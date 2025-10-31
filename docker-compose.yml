@@ -1,0 +1,273 @@
+x-service-defaults: &service-defaults
+  restart: unless-stopped
+  env_file:
+    - .env
+  networks:
+    - dent-ai-net
+
+services:
+  postgres:
+    <<: *service-defaults
+    image: postgres:16.3-alpine
+    container_name: dent_ai_postgres
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    ports:
+      - "${POSTGRES_HOST_PORT:-5432}:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - postgres-backups:/var/lib/postgresql/backups
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  qdrant:
+    <<: *service-defaults
+    image: qdrant/qdrant:v1.15.5
+    container_name: dent_ai_qdrant
+    ports:
+      - "${QDRANT_GRPC_PORT:-6333}:6333"
+      - "${QDRANT_HTTP_PORT:-6334}:6334"
+    volumes:
+      - qdrant-storage:/qdrant/storage
+      - qdrant-snapshots:/qdrant/snapshots
+    healthcheck:
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/6333"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    <<: *service-defaults
+    image: redis:7.2-alpine
+    container_name: dent_ai_redis
+    command:
+      - redis-server
+      - "--save"
+      - ""
+      - "--appendonly"
+      - "yes"
+      - "--requirepass"
+      - "${REDIS_PASSWORD}"
+    ports:
+      - "${REDIS_HOST_PORT:-6379}:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  minio:
+    <<: *service-defaults
+    image: minio/minio:RELEASE.2025-09-07T16-13-09Z
+    container_name: dent_ai_minio
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+    command: ["minio", "server", "/data", "--console-address", ":9001"]
+    ports:
+      - "${MINIO_API_PORT:-9000}:9000"
+      - "${MINIO_CONSOLE_PORT:-9001}:9001"
+    volumes:
+      - minio-data:/data
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:9000/minio/health/live"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+  postgres-backup:
+    <<: *service-defaults
+    image: ${BACKUP_IMAGE:-dent_ai_postgres_backup:dev}
+    build:
+      context: .
+      dockerfile: infra/docker/backup.Dockerfile
+    container_name: dent_ai_pg_backup
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      MINIO_ENDPOINT: ${MINIO_ENDPOINT}
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+      BACKUP_BUCKET: ${BACKUP_BUCKET:-dent-ai-backups}
+      BACKUP_RETENTION_DAYS: ${BACKUP_RETENTION_DAYS:-7}
+      BACKUP_SCHEDULE: ${BACKUP_SCHEDULE:-0 3 * * *}
+    volumes:
+      - postgres-backups:/backups
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_started
+
+  vault:
+    <<: *service-defaults
+    image: hashicorp/vault:1.17.6
+    container_name: dent_ai_vault
+    cap_add:
+      - IPC_LOCK
+    environment:
+      VAULT_ADDR: ${VAULT_ADDR}
+    command: ["vault", "server", "-config=/vault/config/config.hcl"]
+    ports:
+      - "${VAULT_HOST_PORT:-8200}:8200"
+    volumes:
+      - ./infra/vault:/vault/config:ro
+      - vault-file:/vault/file
+      - vault-logs:/vault/logs
+    healthcheck:
+      test: ["CMD", "vault", "status"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+  otel-collector:
+    <<: *service-defaults
+    image: otel/opentelemetry-collector-contrib:0.101.0
+    container_name: dent_ai_otel_collector
+    command: ["--config=/etc/otelcol/config.yaml"]
+    volumes:
+      - ./infra/otel/config.yaml:/etc/otelcol/config.yaml:ro
+    ports:
+      - "4317:4317"
+      - "4318:4318"
+    depends_on:
+      - loki
+    healthcheck:
+      test: ["CMD", "otelcol-contrib", "--config=/etc/otelcol/config.yaml", "--dry-run"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    profiles: ["observability"]
+
+  loki:
+    <<: *service-defaults
+    image: grafana/loki:3.0.0
+    container_name: dent_ai_loki
+    command: ["-config.file=/etc/loki/config.yaml"]
+    ports:
+      - "${LOKI_PORT:-3100}:3100"
+    volumes:
+      - ./infra/loki/config.yaml:/etc/loki/config.yaml:ro
+      - loki-data:/loki
+    profiles: ["observability"]
+
+  promtail:
+    <<: *service-defaults
+    image: grafana/promtail:3.0.0
+    container_name: dent_ai_promtail
+    command: ["-config.file=/etc/promtail/config.yaml"]
+    volumes:
+      - ./infra/promtail/config.yaml:/etc/promtail/config.yaml:ro
+      - /var/log:/var/log:ro
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+    depends_on:
+      - loki
+    profiles: ["observability"]
+
+  grafana:
+    <<: *service-defaults
+    image: grafana/grafana:11.1.0
+    container_name: dent_ai_grafana
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-change-me}
+      GF_PATHS_PROVISIONING: /etc/grafana/provisioning
+    ports:
+      - "${GRAFANA_PORT:-3000}:3000"
+    volumes:
+      - ./infra/grafana/provisioning:/etc/grafana/provisioning
+      - grafana-data:/var/lib/grafana
+    depends_on:
+      - loki
+      - otel-collector
+    profiles: ["observability"]
+
+  app:
+    <<: *service-defaults
+    image: ${APP_IMAGE:-dent_ai_app:dev}
+    build:
+      context: .
+      dockerfile: infra/docker/app.Dockerfile
+    container_name: dent_ai_app
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
+      QDRANT_URL: http://qdrant:6333
+      MINIO_ENDPOINT: http://minio:9000
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+      VAULT_ADDR: ${VAULT_ADDR}
+      VAULT_TOKEN: ${VAULT_TOKEN}
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT}
+      DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+    ports:
+      - "${APP_HOST_PORT:-8000}:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      qdrant:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_started
+      vault:
+        condition: service_started
+
+  bot:
+    <<: *service-defaults
+    image: ${BOT_IMAGE:-dent_ai_bot:dev}
+    build:
+      context: .
+      dockerfile: infra/docker/bot.Dockerfile
+    container_name: dent_ai_bot
+    environment:
+      TELEGRAM_BOT_TOKEN: ${BOT_TOKEN}
+      PRICING_API_BASE: http://app:8000
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT}
+      DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+    depends_on:
+      app:
+        condition: service_started
+      redis:
+        condition: service_healthy
+      qdrant:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+
+networks:
+  dent-ai-net:
+    driver: bridge
+
+volumes:
+  postgres-data:
+  postgres-backups:
+  qdrant-storage:
+  qdrant-snapshots:
+  redis-data:
+  minio-data:
+  vault-file:
+  vault-logs:
+  loki-data:
+  grafana-data:
+

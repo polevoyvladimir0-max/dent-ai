@@ -1,0 +1,26 @@
+[
+  {
+    "id": "guideline_implant_followup",
+    "title": "Имплантация: контроль и гигиена",
+    "codes": ["809000", "809100", "809102"],
+    "section": "Имплантация",
+    "summary": "После установки имплантов обязателен контрольный осмотр через 7-10 дней и повторная гигиена через 14 дней.",
+    "reference": "https://example.org/clinical/implants/followup"
+  },
+  {
+    "id": "guideline_anesthesia",
+    "title": "Обезболивание при хирургии",
+    "codes": ["809000", "809100"],
+    "section": "Имплантация",
+    "summary": "Перед хирургическими манипуляциями по имплантации используется проводниковая анестезия артикаином 4%.",
+    "reference": "https://example.org/clinical/anesthesia/implant"
+  },
+  {
+    "id": "guideline_professional_cleaning",
+    "title": "Профгигиена до протезирования",
+    "codes": ["202208", "202210"],
+    "section": "Гигиена",
+    "summary": "Перед ортопедическим лечением рекомендуется профессиональная гигиена и реминерализация эмали.",
+    "reference": "https://example.org/clinical/hygiene/prep"
+  }
+]

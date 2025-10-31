@@ -1,0 +1,110 @@
+name: CI
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+env:
+  PYTHON_VERSION: "3.13"
+
+jobs:
+  lint-and-test:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-runtime.txt
+
+      - name: Static type check
+        run: python -m compileall app bot scripts db pdf_generator.py
+
+  build-and-push:
+    needs: lint-and-test
+    runs-on: ubuntu-24.04
+    env:
+      REGISTRY: ${{ secrets.REGISTRY_URL }}
+      REGISTRY_USER: ${{ secrets.REGISTRY_USER }}
+      REGISTRY_PASSWORD: ${{ secrets.REGISTRY_PASSWORD }}
+      IMAGE_TAG: ${{ github.sha }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ env.REGISTRY_USER }}
+          password: ${{ env.REGISTRY_PASSWORD }}
+
+      - name: Build and push app image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: infra/docker/app.Dockerfile
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/dent-ai/app:${{ env.IMAGE_TAG }}
+            ${{ env.REGISTRY }}/dent-ai/app:latest
+
+      - name: Build and push bot image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: infra/docker/bot.Dockerfile
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/dent-ai/bot:${{ env.IMAGE_TAG }}
+            ${{ env.REGISTRY }}/dent-ai/bot:latest
+
+      - name: Build and push backup image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: infra/docker/backup.Dockerfile
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/dent-ai/backup:${{ env.IMAGE_TAG }}
+            ${{ env.REGISTRY }}/dent-ai/backup:latest
+
+  deploy:
+    if: github.ref == 'refs/heads/main'
+    needs: build-and-push
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Deploy to production host
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          script: |
+            set -euo pipefail
+            export REGISTRY="${{ secrets.REGISTRY_URL }}"
+            export IMAGE_TAG="${{ github.sha }}"
+            export APP_IMAGE="${REGISTRY}/dent-ai/app:${IMAGE_TAG}"
+            export BOT_IMAGE="${REGISTRY}/dent-ai/bot:${IMAGE_TAG}"
+            export BACKUP_IMAGE="${REGISTRY}/dent-ai/backup:${IMAGE_TAG}"
+            cd "${{ secrets.DEPLOY_PATH }}"
+            docker login "${REGISTRY}" -u "${{ secrets.REGISTRY_USER }}" -p "${{ secrets.REGISTRY_PASSWORD }}"
+            export APP_IMAGE
+            export BOT_IMAGE
+            export BACKUP_IMAGE
+            docker compose pull app bot postgres-backup
+            docker compose up -d --remove-orphans
+            docker image prune -f
+
