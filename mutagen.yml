@@ -1,0 +1,21 @@
+sync:
+  defaults:
+    mode: two-way-resolved
+    ignore:
+      vcs: true
+      paths:
+        - .venv
+        - __pycache__
+        - '*.pyc'
+        - backups
+        - storage
+        - tmp
+  sessions:
+    dent-ai:
+      alpha: .
+      beta: ssh://ubuntu@158.160.203.51//srv/dent_ai
+      permissions:
+        defaultFileMode: 0644
+        defaultDirectoryMode: 0755
+      symlink:
+        mode: portable
