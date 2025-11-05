@@ -1,0 +1,342 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Dent AI environment registry",
+  "description": "Определение всех переменных окружения и секретов, используемых локально и в CI/CD",
+  "order": {
+    "compose": [
+      "APP_HOST_PORT",
+      "APP_IMAGE",
+      "BOT_IMAGE",
+      "BACKUP_IMAGE",
+      "POSTGRES_HOST_PORT",
+      "POSTGRES_USER",
+      "POSTGRES_PASSWORD",
+      "POSTGRES_DB",
+      "QDRANT_GRPC_PORT",
+      "QDRANT_HTTP_PORT",
+      "REDIS_HOST_PORT",
+      "REDIS_PASSWORD",
+      "MINIO_API_PORT",
+      "MINIO_CONSOLE_PORT",
+      "MINIO_ROOT_USER",
+      "MINIO_ROOT_PASSWORD",
+      "MINIO_ENDPOINT",
+      "BACKUP_BUCKET",
+      "BACKUP_RETENTION_DAYS",
+      "BACKUP_SCHEDULE",
+      "VAULT_ADDR",
+      "VAULT_HOST_PORT",
+      "VAULT_TOKEN",
+      "OTEL_EXPORTER_OTLP_ENDPOINT",
+      "BOT_TOKEN",
+      "GRAFANA_PORT",
+      "GRAFANA_ADMIN_USER",
+      "GRAFANA_ADMIN_PASSWORD",
+      "GRAFANA_ALERT_TELEGRAM_BOT_TOKEN",
+      "GRAFANA_ALERT_TELEGRAM_CHAT_ID",
+      "PROMETHEUS_PORT",
+      "PROMETHEUS_RETENTION",
+      "AUTOHEAL_INTERVAL",
+      "AUTOHEAL_START_PERIOD"
+    ],
+    "ci": [
+      "REGISTRY_URL",
+      "REGISTRY_USER",
+      "REGISTRY_PASSWORD",
+      "DEPLOY_HOST",
+      "DEPLOY_USER",
+      "DEPLOY_SSH_KEY",
+      "DEPLOY_PATH"
+    ]
+  },
+  "profiles": {
+    "local": {
+      "APP_IMAGE": "dent_ai_app:dev",
+      "BOT_IMAGE": "dent_ai_bot:dev",
+      "BACKUP_IMAGE": "dent_ai_postgres_backup:dev",
+      "MINIO_ENDPOINT": "http://minio:9000",
+      "VAULT_ADDR": "http://vault:8200",
+      "OTEL_EXPORTER_OTLP_ENDPOINT": "",
+      "GRAFANA_PORT": "3000"
+    },
+    "prod": {
+      "OTEL_EXPORTER_OTLP_ENDPOINT": "http://otel-collector:4317"
+    }
+  },
+  "variables": {
+    "APP_HOST_PORT": {
+      "description": "Хостовый порт FastAPI",
+      "default": "8000",
+      "required": true,
+      "scopes": ["compose"],
+      "pattern": "^\\d{2,5}$"
+    },
+    "APP_IMAGE": {
+      "description": "Имя образа приложения. В проде переопределяется GitHub Actions",
+      "default": "dent_ai_app:dev",
+      "required": true,
+      "scopes": ["compose"]
+    },
+    "BOT_IMAGE": {
+      "description": "Имя образа телеграм-бота",
+      "default": "dent_ai_bot:dev",
+      "required": true,
+      "scopes": ["compose"]
+    },
+    "BACKUP_IMAGE": {
+      "description": "Имя образа сервиса резервного копирования",
+      "default": "dent_ai_postgres_backup:dev",
+      "required": true,
+      "scopes": ["compose"]
+    },
+    "POSTGRES_HOST_PORT": {
+      "description": "Хостовый порт PostgreSQL",
+      "default": "5432",
+      "required": true,
+      "scopes": ["compose"],
+      "pattern": "^\\d{2,5}$"
+    },
+    "POSTGRES_USER": {
+      "description": "Имя роли PostgreSQL",
+      "default": "dent_ai",
+      "required": true,
+      "scopes": ["compose"]
+    },
+    "POSTGRES_PASSWORD": {
+      "description": "Пароль роли PostgreSQL",
+      "required": true,
+      "secret": true,
+      "scopes": ["compose"],
+      "minLength": 12
+    },
+    "POSTGRES_DB": {
+      "description": "Имя базы данных PostgreSQL",
+      "default": "dent_ai",
+      "required": true,
+      "scopes": ["compose"]
+    },
+    "QDRANT_GRPC_PORT": {
+      "description": "ГРПЦ порт Qdrant на хосте",
+      "default": "6333",
+      "required": true,
+      "scopes": ["compose"],
+      "pattern": "^\\d{2,5}$"
+    },
+    "QDRANT_HTTP_PORT": {
+      "description": "HTTP порт Qdrant на хосте",
+      "default": "6334",
+      "required": true,
+      "scopes": ["compose"],
+      "pattern": "^\\d{2,5}$"
+    },
+    "REDIS_HOST_PORT": {
+      "description": "Проброшенный порт Redis",
+      "default": "6379",
+      "required": true,
+      "scopes": ["compose"],
+      "pattern": "^\\d{2,5}$"
+    },
+    "REDIS_PASSWORD": {
+      "description": "Пароль Redis",
+      "required": true,
+      "secret": true,
+      "scopes": ["compose"],
+      "minLength": 16
+    },
+    "MINIO_API_PORT": {
+      "description": "Порт API MinIO",
+      "default": "9000",
+      "required": true,
+      "scopes": ["compose"],
+      "pattern": "^\\d{2,5}$"
+    },
+    "MINIO_CONSOLE_PORT": {
+      "description": "Порт консоли MinIO",
+      "default": "9001",
+      "required": true,
+      "scopes": ["compose"],
+      "pattern": "^\\d{2,5}$"
+    },
+    "MINIO_ROOT_USER": {
+      "description": "Root-логин MinIO",
+      "required": true,
+      "scopes": ["compose"],
+      "minLength": 4
+    },
+    "MINIO_ROOT_PASSWORD": {
+      "description": "Root-пароль MinIO",
+      "required": true,
+      "secret": true,
+      "scopes": ["compose"],
+      "minLength": 16
+    },
+    "MINIO_ENDPOINT": {
+      "description": "Endpoint MinIO, который видит приложение",
+      "default": "http://minio:9000",
+      "required": true,
+      "scopes": ["compose"],
+      "pattern": "^https?:\\/\\/.+"
+    },
+    "BACKUP_BUCKET": {
+      "description": "Bucket для дампов PostgreSQL в MinIO",
+      "default": "dent-ai-backups",
+      "required": true,
+      "scopes": ["compose"],
+      "pattern": "^[a-z0-9][a-z0-9-]{2,62}$"
+    },
+    "BACKUP_RETENTION_DAYS": {
+      "description": "Сколько дней хранить бэкапы",
+      "default": "7",
+      "required": true,
+      "scopes": ["compose"],
+      "pattern": "^\\d+$"
+    },
+    "BACKUP_SCHEDULE": {
+      "description": "CRON расписание для supercronic",
+      "default": "0 3 * * *",
+      "required": true,
+      "scopes": ["compose"],
+      "pattern": "^.+$"
+    },
+    "VAULT_ADDR": {
+      "description": "Базовый URL Vault",
+      "default": "http://vault:8200",
+      "required": true,
+      "scopes": ["compose"],
+      "pattern": "^https?:\\/\\/.+"
+    },
+    "VAULT_HOST_PORT": {
+      "description": "Хостовый порт Vault",
+      "default": "8200",
+      "required": true,
+      "scopes": ["compose"],
+      "pattern": "^\\d{2,5}$"
+    },
+    "VAULT_TOKEN": {
+      "description": "Токен для доступа приложения к Vault",
+      "required": false,
+      "secret": true,
+      "scopes": ["compose"]
+    },
+    "OTEL_EXPORTER_OTLP_ENDPOINT": {
+      "description": "Endpoint OTLP, если собираем метрики/трейсы",
+      "default": "",
+      "required": false,
+      "scopes": ["compose"],
+      "allowEmpty": true
+    },
+    "BOT_TOKEN": {
+      "description": "Telegram Bot API токен",
+      "required": true,
+      "secret": true,
+      "scopes": ["compose"],
+      "pattern": "^\\d{6,}:[A-Za-z0-9_-]{30,}$"
+    },
+    "GRAFANA_PORT": {
+      "description": "Порт графаны на хосте",
+      "default": "3000",
+      "required": true,
+      "scopes": ["compose"],
+      "pattern": "^\\d{2,5}$"
+    },
+    "GRAFANA_ADMIN_USER": {
+      "description": "Логин администратора Grafana",
+      "default": "admin",
+      "required": true,
+      "scopes": ["compose"]
+    },
+    "GRAFANA_ADMIN_PASSWORD": {
+      "description": "Пароль администратора Grafana",
+      "required": true,
+      "secret": true,
+      "scopes": ["compose"],
+      "minLength": 12
+    },
+    "GRAFANA_ALERT_TELEGRAM_BOT_TOKEN": {
+      "description": "Telegram Bot API токен для алертов Grafana",
+      "required": false,
+      "secret": true,
+      "scopes": ["compose"],
+      "allowEmpty": true
+    },
+    "GRAFANA_ALERT_TELEGRAM_CHAT_ID": {
+      "description": "Chat ID, куда Grafana отправляет алерты",
+      "required": false,
+      "secret": true,
+      "scopes": ["compose"],
+      "allowEmpty": true
+    },
+    "PROMETHEUS_PORT": {
+      "description": "Хостовый порт Prometheus",
+      "default": "9090",
+      "required": true,
+      "scopes": ["compose"],
+      "pattern": "^\\d{2,5}$"
+    },
+    "PROMETHEUS_RETENTION": {
+      "description": "Срок хранения метрик Prometheus (например 15d)",
+      "default": "15d",
+      "required": true,
+      "scopes": ["compose"],
+      "pattern": "^\\d+(s|m|h|d|w|y)$"
+    },
+    "AUTOHEAL_INTERVAL": {
+      "description": "Период проверки контейнеров автохилером (сек)",
+      "default": "5",
+      "required": true,
+      "scopes": ["compose"],
+      "pattern": "^\\d+$"
+    },
+    "AUTOHEAL_START_PERIOD": {
+      "description": "Грейс-период (сек) перед авто-перезапуском",
+      "default": "30",
+      "required": true,
+      "scopes": ["compose"],
+      "pattern": "^\\d+$"
+    },
+    "REGISTRY_URL": {
+      "description": "Адрес контейнерного реестра (например cr.yandex/xxxxx)",
+      "required": true,
+      "scopes": ["ci"],
+      "pattern": "^[a-z0-9.-]+/.+"
+    },
+    "REGISTRY_USER": {
+      "description": "Имя пользователя/сервисного аккаунта для логина в реестр",
+      "required": true,
+      "scopes": ["ci"],
+      "pattern": "^[A-Za-z0-9_.-]+$"
+    },
+    "REGISTRY_PASSWORD": {
+      "description": "Пароль/JSON ключ от реестра",
+      "required": true,
+      "secret": true,
+      "scopes": ["ci"]
+    },
+    "DEPLOY_HOST": {
+      "description": "Публичный IP или DNS прод-сервера",
+      "required": true,
+      "scopes": ["ci"],
+      "pattern": "^.+$"
+    },
+    "DEPLOY_USER": {
+      "description": "Пользователь для SSH на прод-сервер",
+      "required": true,
+      "scopes": ["ci"],
+      "pattern": "^[a-z_][a-z0-9_-]*$"
+    },
+    "DEPLOY_SSH_KEY": {
+      "description": "Приватный SSH-ключ для деплоя",
+      "required": true,
+      "secret": true,
+      "scopes": ["ci"],
+      "pattern": "-----BEGIN"
+    },
+    "DEPLOY_PATH": {
+      "description": "Каталог на сервере с docker-compose",
+      "required": true,
+      "scopes": ["ci"],
+      "pattern": "^/.+"
+    }
+  }
+}
+

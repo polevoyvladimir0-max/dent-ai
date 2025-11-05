@@ -1,0 +1,12 @@
+groups:
+  - name: blackbox_uptime
+    rules:
+      - alert: EndpointDown
+        expr: probe_success == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "HTTP endpoint down for {{ $labels.instance }}"
+          description: "Blackbox probe failed for {{ $labels.instance }}"
+

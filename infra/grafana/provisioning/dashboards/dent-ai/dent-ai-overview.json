@@ -1,0 +1,115 @@
+{
+  "id": null,
+  "uid": "dent-ai-overview",
+  "title": "Dent AI Overview",
+  "timezone": "browser",
+  "version": 1,
+  "schemaVersion": 39,
+  "editable": true,
+  "refresh": "30s",
+  "tags": ["dent-ai"],
+  "graphTooltip": 1,
+  "description": "Service availability, logs and traces for Dent AI stack.",
+  "panels": [
+    {
+      "type": "stat",
+      "title": "API Availability (5m)",
+      "id": 1,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {"h": 8, "w": 8, "x": 0, "y": 0},
+      "options": {
+        "reduceOptions": {"calcs": ["last"], "fields": "", "values": false},
+        "orientation": "auto",
+        "colorMode": "value",
+        "graphMode": "none",
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "expr": "avg_over_time(probe_success{instance=\"http://app:8000/ping\"}[5m])",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"color": "red", "value": null},
+              {"color": "orange", "value": 0.9},
+              {"color": "green", "value": 0.99}
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Blackbox Probe Success",
+      "id": 2,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {"h": 8, "w": 8, "x": 8, "y": 0},
+      "targets": [
+        {
+          "expr": "probe_success",
+          "legendFormat": "{{instance}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "min": 0,
+          "max": 1
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "logs",
+      "title": "Recent Errors",
+      "id": 3,
+      "datasource": {
+        "type": "loki",
+        "uid": "loki"
+      },
+      "gridPos": {"h": 16, "w": 16, "x": 0, "y": 8},
+      "targets": [
+        {
+          "expr": "{level=\"error\"}",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "dedupStrategy": "none",
+        "enableLogDetails": true,
+        "showTime": true,
+        "sortOrder": "Descending",
+        "wrapLogMessage": true
+      }
+    }
+  ],
+  "templating": {
+    "list": [
+      {
+        "name": "Service",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "prometheus"
+        },
+        "query": "label_values(probe_success, instance)",
+        "hide": 2
+      }
+    ]
+  }
+}
+

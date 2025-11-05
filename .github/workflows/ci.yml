@@ -8,10 +8,15 @@ on:
 
 env:
   PYTHON_VERSION: "3.13"
+  PIP_CACHE_DIR: "~/.cache/pip"
+  PLATFORMS: "linux/amd64,linux/arm64"
 
 jobs:
-  lint-and-test:
+  quality:
+    name: Quality Gate
     runs-on: ubuntu-24.04
+    permissions:
+      contents: read
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -21,25 +26,66 @@ jobs:
         with:
           python-version: ${{ env.PYTHON_VERSION }}
 
-      - name: Install dependencies
+      - name: Cache pip packages
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.PIP_CACHE_DIR }}
+          key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      - name: Install tooling
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements-runtime.txt
+          pip install -r requirements.txt
+          pip install pip-audit semgrep
 
-      - name: Static type check
+      - name: Bytecode compile
         run: python -m compileall app bot scripts db pdf_generator.py
 
+      - name: Pytest suite
+        env:
+          PYTHONWARNINGS: "error::DeprecationWarning"
+        run: pytest --maxfail=1 --disable-warnings
+
+      - name: pip-audit (high severity)
+        run: pip-audit -r requirements.txt --fail-on high
+
+      - name: Semgrep SAST
+        run: semgrep --config=p/ci --error
+
+      - name: Grype scan
+        uses: anchore/grype-action@v0.5.0
+        with:
+          path: .
+          fail-build: true
+          severity-cutoff: high
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
   build-and-push:
-    needs: lint-and-test
+    name: Build & Push Images
+    needs: quality
     runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
     env:
       REGISTRY: ${{ secrets.REGISTRY_URL }}
       REGISTRY_USER: ${{ secrets.REGISTRY_USER }}
       REGISTRY_PASSWORD: ${{ secrets.REGISTRY_PASSWORD }}
       IMAGE_TAG: ${{ github.sha }}
+    outputs:
+      app_digest: ${{ steps.build_app.outputs.digest }}
+      bot_digest: ${{ steps.build_bot.outputs.digest }}
+      backup_digest: ${{ steps.build_backup.outputs.digest }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -51,41 +97,127 @@ jobs:
           username: ${{ env.REGISTRY_USER }}
           password: ${{ env.REGISTRY_PASSWORD }}
 
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3.6.0
+
       - name: Build and push app image
+        id: build_app
         uses: docker/build-push-action@v6
         with:
           context: .
           file: infra/docker/app.Dockerfile
           push: true
+          platforms: ${{ env.PLATFORMS }}
           tags: |
             ${{ env.REGISTRY }}/dent-ai/app:${{ env.IMAGE_TAG }}
             ${{ env.REGISTRY }}/dent-ai/app:latest
+          cache-from: type=gha,scope=app
+          cache-to: type=gha,scope=app,mode=max
+          provenance: true
+          sbom: true
+
+      - name: Sign app image
+        env:
+          COSIGN_YES: "true"
+        run: cosign sign --yes ${{ env.REGISTRY }}/dent-ai/app@${{ steps.build_app.outputs.digest }}
+
+      - name: SBOM (app)
+        uses: anchore/sbom-action@v0.15.4
+        with:
+          image: ${{ env.REGISTRY }}/dent-ai/app@${{ steps.build_app.outputs.digest }}
+          output-file: sbom-app.spdx.json
 
       - name: Build and push bot image
+        id: build_bot
         uses: docker/build-push-action@v6
         with:
           context: .
           file: infra/docker/bot.Dockerfile
           push: true
+          platforms: ${{ env.PLATFORMS }}
           tags: |
             ${{ env.REGISTRY }}/dent-ai/bot:${{ env.IMAGE_TAG }}
             ${{ env.REGISTRY }}/dent-ai/bot:latest
+          cache-from: type=gha,scope=bot
+          cache-to: type=gha,scope=bot,mode=max
+          provenance: true
+          sbom: true
+
+      - name: Sign bot image
+        env:
+          COSIGN_YES: "true"
+        run: cosign sign --yes ${{ env.REGISTRY }}/dent-ai/bot@${{ steps.build_bot.outputs.digest }}
+
+      - name: SBOM (bot)
+        uses: anchore/sbom-action@v0.15.4
+        with:
+          image: ${{ env.REGISTRY }}/dent-ai/bot@${{ steps.build_bot.outputs.digest }}
+          output-file: sbom-bot.spdx.json
 
       - name: Build and push backup image
+        id: build_backup
         uses: docker/build-push-action@v6
         with:
           context: .
           file: infra/docker/backup.Dockerfile
           push: true
+          platforms: ${{ env.PLATFORMS }}
           tags: |
             ${{ env.REGISTRY }}/dent-ai/backup:${{ env.IMAGE_TAG }}
             ${{ env.REGISTRY }}/dent-ai/backup:latest
+          cache-from: type=gha,scope=backup
+          cache-to: type=gha,scope=backup,mode=max
+          provenance: true
+          sbom: true
+
+      - name: Sign backup image
+        env:
+          COSIGN_YES: "true"
+        run: cosign sign --yes ${{ env.REGISTRY }}/dent-ai/backup@${{ steps.build_backup.outputs.digest }}
+
+      - name: SBOM (backup)
+        uses: anchore/sbom-action@v0.15.4
+        with:
+          image: ${{ env.REGISTRY }}/dent-ai/backup@${{ steps.build_backup.outputs.digest }}
+          output-file: sbom-backup.spdx.json
+
+      - name: Upload SBOM artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom-${{ github.sha }}
+          path: |
+            sbom-app.spdx.json
+            sbom-bot.spdx.json
+            sbom-backup.spdx.json
 
   deploy:
     if: github.ref == 'refs/heads/main'
     needs: build-and-push
     runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      id-token: write
     steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Validate CI secrets against schema
+        shell: pwsh
+        run: |
+          $payload = @{
+            REGISTRY_URL    = "${{ secrets.REGISTRY_URL }}"
+            REGISTRY_USER   = "${{ secrets.REGISTRY_USER }}"
+            REGISTRY_PASSWORD = "${{ secrets.REGISTRY_PASSWORD }}"
+            DEPLOY_HOST     = "${{ secrets.DEPLOY_HOST }}"
+            DEPLOY_USER     = "${{ secrets.DEPLOY_USER }}"
+            DEPLOY_SSH_KEY  = "${{ secrets.DEPLOY_SSH_KEY }}"
+            DEPLOY_PATH     = "${{ secrets.DEPLOY_PATH }}"
+          }
+          $json = $payload | ConvertTo-Json -Depth 2 -Compress
+          Set-Content -Path ci-secrets.json -Value $json -NoNewline
+          ./infra/scripts/generate-env.ps1 -Target ci -SecretsPath ./ci-secrets.json -DryRun
+          Remove-Item ci-secrets.json
+
       - name: Deploy to production host
         uses: appleboy/ssh-action@v1.2.0
         with:
@@ -96,15 +228,17 @@ jobs:
             set -euo pipefail
             export REGISTRY="${{ secrets.REGISTRY_URL }}"
             export IMAGE_TAG="${{ github.sha }}"
-            export APP_IMAGE="${REGISTRY}/dent-ai/app:${IMAGE_TAG}"
-            export BOT_IMAGE="${REGISTRY}/dent-ai/bot:${IMAGE_TAG}"
-            export BACKUP_IMAGE="${REGISTRY}/dent-ai/backup:${IMAGE_TAG}"
+            export APP_IMAGE="${REGISTRY}/dent-ai/app@${{ needs.build-and-push.outputs.app_digest }}"
+            export BOT_IMAGE="${REGISTRY}/dent-ai/bot@${{ needs.build-and-push.outputs.bot_digest }}"
+            export BACKUP_IMAGE="${REGISTRY}/dent-ai/backup@${{ needs.build-and-push.outputs.backup_digest }}"
             cd "${{ secrets.DEPLOY_PATH }}"
-            docker login "${REGISTRY}" -u "${{ secrets.REGISTRY_USER }}" -p "${{ secrets.REGISTRY_PASSWORD }}"
+            echo "${{ secrets.REGISTRY_PASSWORD }}" | docker login "${REGISTRY}" -u "${{ secrets.REGISTRY_USER }}" --password-stdin
             export APP_IMAGE
             export BOT_IMAGE
             export BACKUP_IMAGE
             docker compose pull app bot postgres-backup
             docker compose up -d --remove-orphans
+            sleep 20
+            curl --fail --max-time 10 http://127.0.0.1:8000/ping
             docker image prune -f
 

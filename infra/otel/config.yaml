@@ -13,17 +13,15 @@ processors:
     spike_limit_mib: 64
 
 exporters:
-  otlp/loki:
-    endpoint: http://loki:4317
+  otlp/tempo:
+    endpoint: tempo:4317
     tls:
       insecure: true
   loki:
     endpoint: http://loki:3100/loki/api/v1/push
-    labels:
-      resource:
-        service.name: "${SERVICE_NAME}"
   prometheus:
-    endpoint: ":9100"
+    endpoint: "0.0.0.0:9100"
+    namespace: dent_ai
   logging:
     loglevel: info
 
@@ -35,7 +33,7 @@ service:
     traces:
       receivers: [otlp]
       processors: [memory_limiter, batch]
-      exporters: [otlp/loki]
+      exporters: [otlp/tempo]
     logs:
       receivers: [otlp]
       processors: [batch]
