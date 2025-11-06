@@ -54,14 +54,13 @@ jobs:
       - name: Semgrep SAST
         run: semgrep --config=p/ci --error
 
+      - name: Install Grype
+        run: |
+          curl -sSfL https://raw.githubusercontent.com/anchore/grype/main/install.sh | sudo sh -s -- -b /usr/local/bin
+
       - name: Grype scan
-        uses: anchore/grype-action@v0.5.0
-        with:
-          path: .
-          fail-build: true
-          severity-cutoff: high
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          grype dir:. --fail-on high
 
   build-and-push:
     name: Build & Push Images
