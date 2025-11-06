@@ -37,7 +37,7 @@ jobs:
       - name: Install tooling
         run: |
           python -m pip install --upgrade pip
-          grep -v "pywin32" requirements.txt > requirements-ci.txt || cp requirements.txt requirements-ci.txt
+          grep -vE "(pywin32|pypiwin32)" requirements.txt > requirements-ci.txt || cp requirements.txt requirements-ci.txt
           pip install -r requirements-ci.txt
           pip install pip-audit semgrep
 
