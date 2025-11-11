@@ -104,11 +104,54 @@ jobs:
         uses: docker/setup-buildx-action@v3
 
       - name: Log in to registry
-        uses: docker/login-action@v3
-        with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ env.REGISTRY_USER }}
-          password: ${{ env.REGISTRY_PASSWORD }}
+        env:
+          REGISTRY_FULL: ${{ env.REGISTRY }}
+          REGISTRY_USER: ${{ env.REGISTRY_USER }}
+          REGISTRY_PASSWORD: ${{ env.REGISTRY_PASSWORD }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${REGISTRY_FULL}" ]; then
+            echo "REGISTRY secret is empty" >&2
+            exit 1
+          fi
+
+          REGISTRY_HOST="${REGISTRY_FULL%%/*}"
+          REGISTRY_SUFFIX="${REGISTRY_FULL#${REGISTRY_HOST}}"
+          if [ "${REGISTRY_SUFFIX}" = "${REGISTRY_FULL}" ]; then
+            REGISTRY_SUFFIX=""
+          fi
+          if [ -z "${REGISTRY_HOST}" ]; then
+            echo "Unable to derive registry host from ${REGISTRY_FULL}" >&2
+            exit 1
+          fi
+
+          # Add a secondary endpoint that sometimes succeeds when cr.yandex is flaky
+          FALLBACK_HOSTS="${REGISTRY_HOST}"
+          if [ "${REGISTRY_HOST}" = "cr.yandex" ]; then
+            FALLBACK_HOSTS="${FALLBACK_HOSTS} registry.cloud.yandex.net"
+          fi
+
+          for host in ${FALLBACK_HOSTS}; do
+            echo "Attempting docker login to ${host}"
+            for attempt in $(seq 1 5); do
+              echo "  try ${attempt}/5..."
+              if echo "${REGISTRY_PASSWORD}" | docker login "${host}" -u "${REGISTRY_USER}" --password-stdin; then
+                echo "Logged in to ${host}"
+                if [ "${host}" != "${REGISTRY_HOST}" ]; then
+                  UPDATED_REGISTRY="${host}${REGISTRY_SUFFIX}"
+                  echo "Using fallback registry endpoint ${UPDATED_REGISTRY} for pushes"
+                  echo "REGISTRY=${UPDATED_REGISTRY}" >> "${GITHUB_ENV}"
+                fi
+                exit 0
+              fi
+              sleep $((attempt * 5))
+            done
+            echo "Failed to log in via ${host}" >&2
+          done
+
+          echo "All registry login attempts failed" >&2
+          exit 1
 
       - name: Install cosign
         uses: sigstore/cosign-installer@v3.6.0
