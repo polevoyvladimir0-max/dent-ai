@@ -44,7 +44,7 @@ jobs:
           python -m pip install --upgrade pip
           grep -vE "(pywin32|pypiwin32|PyAudio)" requirements.txt > requirements-ci.txt || cp requirements.txt requirements-ci.txt
           pip install -r requirements-ci.txt
-          pip install pip-audit semgrep
+          pip install pip-audit==2.7.3 semgrep
 
       - name: Bytecode compile
         run: python -m compileall app bot scripts db pdf_generator.py
@@ -63,7 +63,7 @@ jobs:
           exit $status
 
       - name: pip-audit (high severity)
-        run: pip-audit -r requirements.txt --fail-on high
+        run: python -m pip_audit -r requirements.txt --fail-on high
 
       - name: Semgrep SAST
         run: semgrep --config=p/ci --error
