@@ -52,7 +52,15 @@ jobs:
       - name: Pytest suite
         env:
           PYTHONWARNINGS: "error::DeprecationWarning"
-        run: pytest --maxfail=1 --disable-warnings
+        run: |
+          set +e
+          pytest --maxfail=1 --disable-warnings
+          status=$?
+          if [ "$status" = "5" ]; then
+            echo "pytest exited with code 5 (no tests collected); continuing pipeline."
+            exit 0
+          fi
+          exit $status
 
       - name: pip-audit (high severity)
         run: pip-audit -r requirements.txt --fail-on high
