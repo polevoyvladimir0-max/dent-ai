@@ -129,7 +129,7 @@ jobs:
           # Add a secondary endpoint that sometimes succeeds when cr.yandex is flaky
           FALLBACK_HOSTS="${REGISTRY_HOST}"
           if [ "${REGISTRY_HOST}" = "cr.yandex" ]; then
-            FALLBACK_HOSTS="${FALLBACK_HOSTS} registry.cloud.yandex.net"
+            FALLBACK_HOSTS="${FALLBACK_HOSTS} registry.yandexcloud.net container-registry.api.cloud.yandex.net"
           fi
 
           for host in ${FALLBACK_HOSTS}; do
