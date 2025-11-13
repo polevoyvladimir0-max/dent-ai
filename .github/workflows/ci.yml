@@ -680,6 +680,16 @@ jobs:
 
         uses: appleboy/ssh-action@v1.2.0
 
+        env:
+
+          REGISTRY_URL: ${{ secrets.REGISTRY_URL }}
+
+          REGISTRY_USER: ${{ secrets.REGISTRY_USER }}
+
+          REGISTRY_PASSWORD: ${{ secrets.REGISTRY_PASSWORD }}
+
+          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
+
         with:
 
           host: ${{ secrets.DEPLOY_HOST }}
@@ -688,29 +698,27 @@ jobs:
 
           key: ${{ secrets.DEPLOY_SSH_KEY }}
 
+          envs: REGISTRY_URL,REGISTRY_USER,REGISTRY_PASSWORD,DEPLOY_PATH
+
           script: |
 
             set -euo pipefail
 
-            export REGISTRY="${{ secrets.REGISTRY_URL }}"
+            REGISTRY="$REGISTRY_URL"
 
-            export IMAGE_TAG="${{ github.sha }}"
+            IMAGE_TAG="${{ github.sha }}"
 
-            export APP_IMAGE="${REGISTRY}/dent-ai/app@${{ needs.build-and-push.outputs.app_digest }}"
+            APP_IMAGE="${REGISTRY}/dent-ai/app@${{ needs.build-and-push.outputs.app_digest }}"
 
-            export BOT_IMAGE="${REGISTRY}/dent-ai/bot@${{ needs.build-and-push.outputs.bot_digest }}"
+            BOT_IMAGE="${REGISTRY}/dent-ai/bot@${{ needs.build-and-push.outputs.bot_digest }}"
 
-            export BACKUP_IMAGE="${REGISTRY}/dent-ai/backup@${{ needs.build-and-push.outputs.backup_digest }}"
+            BACKUP_IMAGE="${REGISTRY}/dent-ai/backup@${{ needs.build-and-push.outputs.backup_digest }}"
 
-            cd "${{ secrets.DEPLOY_PATH }}"
+            cd "$DEPLOY_PATH"
 
-            echo "${{ secrets.REGISTRY_PASSWORD }}" | docker login "${REGISTRY}" -u "${{ secrets.REGISTRY_USER }}" --password-stdin
+            printf '%s' "$REGISTRY_PASSWORD" | docker login "$REGISTRY" -u "$REGISTRY_USER" --password-stdin
 
-            export APP_IMAGE
-
-            export BOT_IMAGE
-
-            export BACKUP_IMAGE
+            export APP_IMAGE BOT_IMAGE BACKUP_IMAGE
 
             docker compose pull app bot postgres-backup
 
