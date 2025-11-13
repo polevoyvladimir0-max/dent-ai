@@ -26,7 +26,7 @@ RUN apt-get update \
 COPY requirements-runtime.txt /app/requirements-runtime.txt
 RUN pip install --upgrade pip \
     && pip install --no-cache-dir --prefer-binary -r /app/requirements-runtime.txt \
-    && pip cache purge
+    && pip cache purge || true
 
 COPY . /app
 
