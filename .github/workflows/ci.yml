@@ -716,11 +716,24 @@ jobs:
 
             cd "$DEPLOY_PATH"
 
-            if [ -z "${REGISTRY_USER}" ] || [ "${REGISTRY_USER}" = "" ] || [ "${REGISTRY_USER#\{}" != "${REGISTRY_USER}" ]; then
-              REGISTRY_USER="iam"
+            LOGIN_USER="$REGISTRY_USER"
+
+            if [ -z "$LOGIN_USER" ]; then
+
+              LOGIN_USER="iam"
+
             fi
-            printf '%s' "$REGISTRY_PASSWORD" | docker login "$REGISTRY" -u "$REGISTRY_USER" --password-stdin
+
+            if [ "${REGISTRY_PASSWORD#\{}" != "$REGISTRY_PASSWORD" ]; then
+
+              LOGIN_USER="iam"
+
+            fi
+
+            printf '%s' "$REGISTRY_PASSWORD" | docker login "$REGISTRY" -u "$LOGIN_USER" --password-stdin
+
             export APP_IMAGE BOT_IMAGE BACKUP_IMAGE
+
             docker compose pull app bot postgres-backup
 
             docker compose up -d --remove-orphans
