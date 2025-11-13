@@ -464,7 +464,7 @@ jobs:
 
       - name: SBOM (app)
 
-        uses: anchore/sbom-action@v0.15.4
+        uses: anchore/sbom-action@v0.17.0
 
         with:
 
@@ -518,7 +518,7 @@ jobs:
 
       - name: SBOM (bot)
 
-        uses: anchore/sbom-action@v0.15.4
+        uses: anchore/sbom-action@v0.17.0
 
         with:
 
@@ -572,7 +572,7 @@ jobs:
 
       - name: SBOM (backup)
 
-        uses: anchore/sbom-action@v0.15.4
+        uses: anchore/sbom-action@v0.17.0
 
         with:
 
