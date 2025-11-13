@@ -1,300 +1,896 @@
 name: CI
 
+
+
 on:
+
   push:
+
     branches: [ main, master ]
+
   pull_request:
+
     branches: [ main, master ]
+
+
 
 env:
+
   PYTHON_VERSION: "3.13"
+
   PIP_CACHE_DIR: "~/.cache/pip"
+
   PLATFORMS: "linux/amd64,linux/arm64"
 
+
+
 jobs:
+
   quality:
+
     name: Quality Gate
+
     runs-on: ubuntu-24.04
+
     permissions:
+
       contents: read
+
     steps:
+
       - name: Checkout
+
         uses: actions/checkout@v4
+
+
 
       - name: Set up Python
+
         uses: actions/setup-python@v5
+
         with:
+
           python-version: ${{ env.PYTHON_VERSION }}
 
+
+
       - name: Cache pip packages
+
         uses: actions/cache@v4
+
         with:
+
           path: ${{ env.PIP_CACHE_DIR }}
+
           key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
+
           restore-keys: |
+
             ${{ runner.os }}-pip-
 
+
+
       - name: Install system dependencies
+
         run: |
+
           sudo apt-get update
+
           sudo apt-get install -y --no-install-recommends portaudio19-dev libasound2-dev
 
+
+
       - name: Install tooling
+
         run: |
+
           python -m pip install --upgrade pip
+
           grep -vE "(pywin32|pypiwin32|PyAudio)" requirements.txt > requirements-ci.txt || cp requirements.txt requirements-ci.txt
+
           pip install -r requirements-ci.txt
+
           pip install safety semgrep
 
+
+
       - name: Bytecode compile
+
         run: python -m compileall app bot scripts db pdf_generator.py
 
+
+
       - name: Pytest suite
+
         env:
+
           PYTHONWARNINGS: "error::DeprecationWarning"
+
         run: |
+
           set +e
+
           pytest --maxfail=1 --disable-warnings
+
           status=$?
+
           if [ "$status" = "5" ]; then
+
             echo "pytest exited with code 5 (no tests collected); continuing pipeline."
+
             exit 0
+
           fi
+
           exit $status
 
+
+
       - name: Safety vulnerability scan
+
         run: safety check --file=requirements-ci.txt --full-report
 
+
+
       - name: Semgrep SAST
+
         run: semgrep --config=p/ci --error
 
+
+
       - name: Install Grype
+
         run: |
+
           curl -sSfL https://raw.githubusercontent.com/anchore/grype/main/install.sh | sudo sh -s -- -b /usr/local/bin
 
+
+
       - name: Grype scan
+
         run: |
+
           grype dir:. --fail-on high
 
+
+
   build-and-push:
+
     name: Build & Push Images
+
     needs: quality
+
     runs-on: ubuntu-24.04
+
     permissions:
+
       contents: read
+
       packages: write
+
       id-token: write
+
     env:
+
       REGISTRY: ${{ secrets.REGISTRY_URL }}
+
       REGISTRY_USER: ${{ secrets.REGISTRY_USER }}
+
       REGISTRY_PASSWORD: ${{ secrets.REGISTRY_PASSWORD }}
+
       IMAGE_TAG: ${{ github.sha }}
+
     outputs:
+
       app_digest: ${{ steps.build_app.outputs.digest }}
+
       bot_digest: ${{ steps.build_bot.outputs.digest }}
+
       backup_digest: ${{ steps.build_backup.outputs.digest }}
+
     steps:
+
       - name: Checkout
+
         uses: actions/checkout@v4
+
+
 
       - name: Set up QEMU
+
         uses: docker/setup-qemu-action@v3
 
+
+
       - name: Set up Docker Buildx
+
         uses: docker/setup-buildx-action@v3
 
-      - name: Log in to registry
+
+
+      - name: Mint YCR IAM token
+
+        if: env.REGISTRY_PASSWORD != ''
+
         env:
-          REGISTRY_FULL: ${{ env.REGISTRY }}
-          REGISTRY_USER: ${{ env.REGISTRY_USER }}
+
           REGISTRY_PASSWORD: ${{ env.REGISTRY_PASSWORD }}
+
+          REGISTRY_USER: ${{ env.REGISTRY_USER }}
+
         run: |
+
           set -euo pipefail
 
-          if [ -z "${REGISTRY_FULL}" ]; then
-            echo "REGISTRY secret is empty" >&2
-            exit 1
+          result=$(python - <<'PY'
+
+import os
+
+import json
+
+import sys
+
+import time
+
+import urllib.request
+
+import urllib.error
+
+import subprocess
+
+
+
+secret = os.environ.get("REGISTRY_PASSWORD", "").strip()
+
+username = os.environ.get("REGISTRY_USER", "").strip()
+
+
+
+if not secret:
+
+    sys.exit(0)
+
+
+
+
+
+def request_token(payload: dict) -> str:
+
+    data = json.dumps(payload).encode()
+
+    req = urllib.request.Request(
+
+        "https://iam.api.cloud.yandex.net/iam/v1/tokens",
+
+        data=data,
+
+        headers={"Content-Type": "application/json"},
+
+        method="POST",
+
+    )
+
+    try:
+
+        with urllib.request.urlopen(req, timeout=10) as resp:
+
+            body = resp.read().decode()
+
+            parsed = json.loads(body)
+
+            token = parsed.get("iamToken", "")
+
+            return token or ""
+
+    except urllib.error.HTTPError as err:
+
+        sys.stderr.write(f"iam_http_error:{err.code}
+
+")
+
+    except urllib.error.URLError:
+
+        sys.stderr.write("iam_url_error
+
+")
+
+    except Exception:
+
+        sys.stderr.write("iam_unknown_error
+
+")
+
+    return ""
+
+
+
+
+
+token = ""
+
+
+
+if secret.startswith("{"):
+
+    try:
+
+        data = json.loads(secret)
+
+        required = {"id", "service_account_id", "private_key"}
+
+        if required.issubset(data):
+
+            try:
+
+                import jwt  # type: ignore
+
+            except ImportError:
+
+                subprocess.check_call(
+
+                    [sys.executable, "-m", "pip", "install", "pyjwt[crypto]"],
+
+                    stdout=subprocess.DEVNULL,
+
+                    stderr=subprocess.DEVNULL,
+
+                )
+
+                import jwt  # type: ignore
+
+
+
+            now = int(time.time())
+
+            payload = {
+
+                "aud": "https://iam.api.cloud.yandex.net/iam/v1/tokens",
+
+                "iss": data["service_account_id"],
+
+                "iat": now,
+
+                "exp": now + 3600,
+
+            }
+
+            headers = {"alg": "PS256", "typ": "JWT", "kid": data["id"]}
+
+            signed = jwt.encode(payload, data["private_key"], algorithm="PS256", headers=headers)
+
+            minted = request_token({"jwt": signed})
+
+            if minted:
+
+                token = minted
+
+                username = "oauth"
+
+    except Exception:
+
+        sys.stderr.write("sa_token_failed
+
+")
+
+        token = ""
+
+
+
+if not token:
+
+    minted = request_token({"yandexPassportOauthToken": secret})
+
+    if minted:
+
+        token = minted
+
+        username = "oauth"
+
+
+
+if token:
+
+    sys.stdout.write(f"username={username or 'oauth'}
+
+")
+
+    sys.stdout.write(f"token={token}
+
+")
+
+PY
+
+)
+
+
+
+          if [ -n "$result" ]; then
+
+            while IFS='=' read -r key value; do
+
+              case "$key" in
+
+                username)
+
+                  printf 'EFFECTIVE_REGISTRY_USER=%s
+
+' "$value" >> "$GITHUB_ENV"
+
+                  ;;
+
+                token)
+
+                  echo "::add-mask::$value"
+
+                  printf 'EFFECTIVE_REGISTRY_PASSWORD=%s
+
+' "$value" >> "$GITHUB_ENV"
+
+                  ;;
+
+              esac
+
+            done <<< "$result"
+
           fi
+
+
+
+      - name: Log in to registry
+
+        env:
+
+          REGISTRY_FULL: ${{ env.REGISTRY }}
+
+          REGISTRY_USER: ${{ env.REGISTRY_USER }}
+
+          REGISTRY_PASSWORD: ${{ env.REGISTRY_PASSWORD }}
+
+        run: |
+
+          set -euo pipefail
+
+
+
+          if [ -z "${REGISTRY_FULL}" ]; then
+
+            echo "REGISTRY secret is empty" >&2
+
+            exit 1
+
+          fi
+
+
 
           REGISTRY_HOST="${REGISTRY_FULL%%/*}"
+
           REGISTRY_SUFFIX="${REGISTRY_FULL#${REGISTRY_HOST}}"
+
           if [ "${REGISTRY_SUFFIX}" = "${REGISTRY_FULL}" ]; then
+
             REGISTRY_SUFFIX=""
-          fi
-          if [ -z "${REGISTRY_HOST}" ]; then
-            echo "Unable to derive registry host from ${REGISTRY_FULL}" >&2
-            exit 1
+
           fi
 
-          # Add a secondary endpoint that sometimes succeeds when cr.yandex is flaky
-          FALLBACK_HOSTS="${REGISTRY_HOST}"
-          if [ "${REGISTRY_HOST}" = "cr.yandex" ]; then
-            FALLBACK_HOSTS="${FALLBACK_HOSTS} registry.yandexcloud.net container-registry.api.cloud.yandex.net"
+          if [ -z "${REGISTRY_HOST}" ]; then
+
+            echo "Unable to derive registry host from ${REGISTRY_FULL}" >&2
+
+            exit 1
+
           fi
+
+
+
+          FALLBACK_HOSTS="${REGISTRY_HOST}"
+
+          if [ "${REGISTRY_HOST}" = "cr.yandex" ]; then
+
+            FALLBACK_HOSTS="${FALLBACK_HOSTS} registry.yandexcloud.net container-registry.api.cloud.yandex.net"
+
+          fi
+
+
+
+          CANDIDATE_USERS=()
+
+          CANDIDATE_PASSWORDS=()
+
+
+
+          if [ -n "${EFFECTIVE_REGISTRY_PASSWORD:-}" ]; then
+
+            CANDIDATE_USERS+=("${EFFECTIVE_REGISTRY_USER:-oauth}")
+
+            CANDIDATE_PASSWORDS+=("${EFFECTIVE_REGISTRY_PASSWORD}")
+
+          fi
+
+
+
+          if [ -n "${REGISTRY_USER:-}" ] && [ -n "${REGISTRY_PASSWORD:-}" ]; then
+
+            CANDIDATE_USERS+=("${REGISTRY_USER}")
+
+            CANDIDATE_PASSWORDS+=("${REGISTRY_PASSWORD}")
+
+          fi
+
+
+
+          if [ "${#CANDIDATE_PASSWORDS[@]}" -eq 0 ]; then
+
+            echo "No registry credentials available" >&2
+
+            exit 1
+
+          fi
+
+
 
           for host in ${FALLBACK_HOSTS}; do
+
             echo "Attempting docker login to ${host}"
+
             for attempt in $(seq 1 5); do
+
               echo "  try ${attempt}/5..."
-              if echo "${REGISTRY_PASSWORD}" | docker login "${host}" -u "${REGISTRY_USER}" --password-stdin; then
-                echo "Logged in to ${host}"
-                if [ "${host}" != "${REGISTRY_HOST}" ]; then
-                  UPDATED_REGISTRY="${host}${REGISTRY_SUFFIX}"
-                  echo "Using fallback registry endpoint ${UPDATED_REGISTRY} for pushes"
-                  echo "REGISTRY=${UPDATED_REGISTRY}" >> "${GITHUB_ENV}"
+
+              for idx in "${!CANDIDATE_PASSWORDS[@]}"; do
+
+                user="${CANDIDATE_USERS[$idx]}"
+
+                pass="${CANDIDATE_PASSWORDS[$idx]}"
+
+
+
+                if [ -n "${user}" ] || [ -n "${pass}" ]; then
+
+                  continue
+
                 fi
-                exit 0
-              fi
+
+
+
+                if output=$(echo "${pass}" | docker login "${host}" -u "${user}" --password-stdin 2>&1); then
+
+                  printf '%s
+
+' "${output}"
+
+                  if [ "${host}" != "${REGISTRY_HOST}" ]; then
+
+                    UPDATED_REGISTRY="${host}${REGISTRY_SUFFIX}"
+
+                    echo "Using fallback registry endpoint ${UPDATED_REGISTRY} for pushes"
+
+                    echo "REGISTRY=${UPDATED_REGISTRY}" >> "${GITHUB_ENV}"
+
+                  fi
+
+                  exit 0
+
+                else
+
+                  status=$?
+
+                  printf '%s
+
+' "${output}" >&2
+
+                  echo "    credential option $((idx + 1))/${#CANDIDATE_PASSWORDS[@]} failed (exit ${status})" >&2
+
+                fi
+
+              done
+
               sleep $((attempt * 5))
+
             done
+
             echo "Failed to log in via ${host}" >&2
+
           done
 
+
+
           echo "All registry login attempts failed" >&2
+
           exit 1
 
+
+
       - name: Install cosign
+
         uses: sigstore/cosign-installer@v3.6.0
 
+
+
       - name: Build and push app image
+
         id: build_app
+
         uses: docker/build-push-action@v6
+
         with:
+
           context: .
+
           file: infra/docker/app.Dockerfile
+
           push: true
+
           platforms: ${{ env.PLATFORMS }}
+
           tags: |
+
             ${{ env.REGISTRY }}/dent-ai/app:${{ env.IMAGE_TAG }}
+
             ${{ env.REGISTRY }}/dent-ai/app:latest
+
           cache-from: type=gha,scope=app
+
           cache-to: type=gha,scope=app,mode=max
+
           provenance: true
+
           sbom: true
+
+
 
       - name: Sign app image
+
         env:
+
           COSIGN_YES: "true"
+
         run: cosign sign --yes ${{ env.REGISTRY }}/dent-ai/app@${{ steps.build_app.outputs.digest }}
 
+
+
       - name: SBOM (app)
+
         uses: anchore/sbom-action@v0.15.4
+
         with:
+
           image: ${{ env.REGISTRY }}/dent-ai/app@${{ steps.build_app.outputs.digest }}
+
           output-file: sbom-app.spdx.json
 
+
+
       - name: Build and push bot image
+
         id: build_bot
+
         uses: docker/build-push-action@v6
+
         with:
+
           context: .
+
           file: infra/docker/bot.Dockerfile
+
           push: true
+
           platforms: ${{ env.PLATFORMS }}
+
           tags: |
+
             ${{ env.REGISTRY }}/dent-ai/bot:${{ env.IMAGE_TAG }}
+
             ${{ env.REGISTRY }}/dent-ai/bot:latest
+
           cache-from: type=gha,scope=bot
+
           cache-to: type=gha,scope=bot,mode=max
+
           provenance: true
+
           sbom: true
+
+
 
       - name: Sign bot image
+
         env:
+
           COSIGN_YES: "true"
+
         run: cosign sign --yes ${{ env.REGISTRY }}/dent-ai/bot@${{ steps.build_bot.outputs.digest }}
 
+
+
       - name: SBOM (bot)
+
         uses: anchore/sbom-action@v0.15.4
+
         with:
+
           image: ${{ env.REGISTRY }}/dent-ai/bot@${{ steps.build_bot.outputs.digest }}
+
           output-file: sbom-bot.spdx.json
 
+
+
       - name: Build and push backup image
+
         id: build_backup
+
         uses: docker/build-push-action@v6
+
         with:
+
           context: .
+
           file: infra/docker/backup.Dockerfile
+
           push: true
+
           platforms: ${{ env.PLATFORMS }}
+
           tags: |
+
             ${{ env.REGISTRY }}/dent-ai/backup:${{ env.IMAGE_TAG }}
+
             ${{ env.REGISTRY }}/dent-ai/backup:latest
+
           cache-from: type=gha,scope=backup
+
           cache-to: type=gha,scope=backup,mode=max
+
           provenance: true
+
           sbom: true
 
+
+
       - name: Sign backup image
+
         env:
+
           COSIGN_YES: "true"
+
         run: cosign sign --yes ${{ env.REGISTRY }}/dent-ai/backup@${{ steps.build_backup.outputs.digest }}
 
+
+
       - name: SBOM (backup)
+
         uses: anchore/sbom-action@v0.15.4
+
         with:
+
           image: ${{ env.REGISTRY }}/dent-ai/backup@${{ steps.build_backup.outputs.digest }}
+
           output-file: sbom-backup.spdx.json
 
+
+
       - name: Upload SBOM artifacts
+
         uses: actions/upload-artifact@v4
+
         with:
+
           name: sbom-${{ github.sha }}
+
           path: |
+
             sbom-app.spdx.json
+
             sbom-bot.spdx.json
+
             sbom-backup.spdx.json
 
+
+
   deploy:
+
     if: github.ref == 'refs/heads/main'
+
     needs: build-and-push
+
     runs-on: ubuntu-24.04
+
     permissions:
+
       contents: read
+
       id-token: write
+
     steps:
+
       - name: Checkout
+
         uses: actions/checkout@v4
 
+
+
       - name: Validate CI secrets against schema
+
         shell: pwsh
+
         run: |
+
           $payload = @{
+
             REGISTRY_URL    = "${{ secrets.REGISTRY_URL }}"
+
             REGISTRY_USER   = "${{ secrets.REGISTRY_USER }}"
+
             REGISTRY_PASSWORD = "${{ secrets.REGISTRY_PASSWORD }}"
+
             DEPLOY_HOST     = "${{ secrets.DEPLOY_HOST }}"
+
             DEPLOY_USER     = "${{ secrets.DEPLOY_USER }}"
+
             DEPLOY_SSH_KEY  = "${{ secrets.DEPLOY_SSH_KEY }}"
+
             DEPLOY_PATH     = "${{ secrets.DEPLOY_PATH }}"
+
           }
+
           $json = $payload | ConvertTo-Json -Depth 2 -Compress
+
           Set-Content -Path ci-secrets.json -Value $json -NoNewline
+
           ./infra/scripts/generate-env.ps1 -Target ci -SecretsPath ./ci-secrets.json -DryRun
+
           Remove-Item ci-secrets.json
 
+
+
       - name: Deploy to production host
+
         uses: appleboy/ssh-action@v1.2.0
+
         with:
+
           host: ${{ secrets.DEPLOY_HOST }}
+
           username: ${{ secrets.DEPLOY_USER }}
+
           key: ${{ secrets.DEPLOY_SSH_KEY }}
+
           script: |
+
             set -euo pipefail
+
             export REGISTRY="${{ secrets.REGISTRY_URL }}"
+
             export IMAGE_TAG="${{ github.sha }}"
+
             export APP_IMAGE="${REGISTRY}/dent-ai/app@${{ needs.build-and-push.outputs.app_digest }}"
+
             export BOT_IMAGE="${REGISTRY}/dent-ai/bot@${{ needs.build-and-push.outputs.bot_digest }}"
+
             export BACKUP_IMAGE="${REGISTRY}/dent-ai/backup@${{ needs.build-and-push.outputs.backup_digest }}"
+
             cd "${{ secrets.DEPLOY_PATH }}"
+
             echo "${{ secrets.REGISTRY_PASSWORD }}" | docker login "${REGISTRY}" -u "${{ secrets.REGISTRY_USER }}" --password-stdin
+
             export APP_IMAGE
+
             export BOT_IMAGE
+
             export BACKUP_IMAGE
+
             docker compose pull app bot postgres-backup
+
             docker compose up -d --remove-orphans
+
             sleep 20
+
             curl --fail --max-time 10 http://127.0.0.1:8000/ping
+
             docker image prune -f
+
+
+
+
+
+
 

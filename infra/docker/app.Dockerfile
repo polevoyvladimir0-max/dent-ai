@@ -10,7 +10,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-RUN apt-get update \
+RUN apt-get update \ 
     && apt-get install -y --no-install-recommends \
         build-essential \
         curl \
@@ -21,7 +21,7 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements-runtime.txt /app/requirements-runtime.txt
-RUN pip install --upgrade pip \
+RUN pip install --upgrade pip \ 
     && pip install -r /app/requirements-runtime.txt
 
 COPY . /app
