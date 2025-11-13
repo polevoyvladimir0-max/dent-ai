@@ -676,6 +676,50 @@ jobs:
 
 
 
+      - name: Mint YCR IAM token
+
+        env:
+
+          REGISTRY_PASSWORD: ${{ secrets.REGISTRY_PASSWORD }}
+
+          REGISTRY_USER: ${{ secrets.REGISTRY_USER }}
+
+        run: |
+
+          set -euo pipefail
+
+          result=$(python .github/scripts/mint_ycr_token.py)
+
+
+
+          if [ -n "$result" ]; then
+
+            while IFS='=' read -r key value; do
+
+              case "$key" in
+
+                username)
+
+                  printf 'EFFECTIVE_REGISTRY_USER=%s\n' "$value" >> "$GITHUB_ENV"
+
+                  ;;
+
+                token)
+
+                  echo "::add-mask::$value"
+
+                  printf 'EFFECTIVE_REGISTRY_PASSWORD=%s\n' "$value" >> "$GITHUB_ENV"
+
+                  ;;
+
+              esac
+
+            done <<< "$result"
+
+          fi
+
+
+
       - name: Deploy to production host
 
         uses: appleboy/ssh-action@v1.2.0
@@ -688,6 +732,10 @@ jobs:
 
           REGISTRY_PASSWORD: ${{ secrets.REGISTRY_PASSWORD }}
 
+          EFFECTIVE_REGISTRY_USER: ${{ env.EFFECTIVE_REGISTRY_USER }}
+
+          EFFECTIVE_REGISTRY_PASSWORD: ${{ env.EFFECTIVE_REGISTRY_PASSWORD }}
+
           DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
 
         with:
@@ -698,7 +746,7 @@ jobs:
 
           key: ${{ secrets.DEPLOY_SSH_KEY }}
 
-          envs: REGISTRY_URL,REGISTRY_USER,REGISTRY_PASSWORD,DEPLOY_PATH
+          envs: REGISTRY_URL,REGISTRY_USER,REGISTRY_PASSWORD,EFFECTIVE_REGISTRY_USER,EFFECTIVE_REGISTRY_PASSWORD,DEPLOY_PATH
 
           script: |
 
@@ -718,19 +766,23 @@ jobs:
 
             LOGIN_USER="$REGISTRY_USER"
 
+            LOGIN_PASS="$REGISTRY_PASSWORD"
+
+            if [ -n "$EFFECTIVE_REGISTRY_PASSWORD" ]; then
+
+              LOGIN_USER="${EFFECTIVE_REGISTRY_USER:-iam}"
+
+              LOGIN_PASS="$EFFECTIVE_REGISTRY_PASSWORD"
+
+            fi
+
             if [ -z "$LOGIN_USER" ]; then
 
               LOGIN_USER="iam"
 
             fi
 
-            if [ "${REGISTRY_PASSWORD#\{}" != "$REGISTRY_PASSWORD" ]; then
-
-              LOGIN_USER="iam"
-
-            fi
-
-            printf '%s' "$REGISTRY_PASSWORD" | docker login "$REGISTRY" -u "$LOGIN_USER" --password-stdin
+            printf '%s' "$LOGIN_PASS" | docker login "$REGISTRY" -u "$LOGIN_USER" --password-stdin
 
             export APP_IMAGE BOT_IMAGE BACKUP_IMAGE
 
