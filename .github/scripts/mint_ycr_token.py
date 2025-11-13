@@ -47,6 +47,7 @@ def maybe_install_jwt() -> None:
 def main() -> int:
     secret = os.environ.get("REGISTRY_PASSWORD", "").strip()
     username = os.environ.get("REGISTRY_USER", "").strip()
+    username_override: str | None = None
 
     if not secret:
         return 0
@@ -78,7 +79,7 @@ def main() -> int:
                 minted = request_token({"jwt": signed})
                 if minted:
                     token = minted
-                    username = "oauth"
+                    username_override = "iam"
         except Exception:
             print("sa_token_failed", file=sys.stderr)
             token = ""
@@ -87,10 +88,12 @@ def main() -> int:
         minted = request_token({"yandexPassportOauthToken": secret})
         if minted:
             token = minted
-            username = "oauth"
+            username_override = "oauth"
+
+    effective_username = username_override or username or "oauth"
 
     if token:
-        print(f"username={username or 'oauth'}")
+        print(f"username={effective_username}")
         print(f"token={token}")
 
     return 0
