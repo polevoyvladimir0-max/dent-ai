@@ -284,21 +284,15 @@ def request_token(payload: dict) -> str:
 
     except urllib.error.HTTPError as err:
 
-        sys.stderr.write(f"iam_http_error:{err.code}
-
-")
+        sys.stderr.write(f"iam_http_error:{err.code}\n")
 
     except urllib.error.URLError:
 
-        sys.stderr.write("iam_url_error
-
-")
+        sys.stderr.write("iam_url_error\n")
 
     except Exception:
 
-        sys.stderr.write("iam_unknown_error
-
-")
+        sys.stderr.write("iam_unknown_error\n")
 
     return ""
 
@@ -368,9 +362,7 @@ if secret.startswith("{"):
 
     except Exception:
 
-        sys.stderr.write("sa_token_failed
-
-")
+        sys.stderr.write("sa_token_failed\n")
 
         token = ""
 
@@ -390,13 +382,9 @@ if not token:
 
 if token:
 
-    sys.stdout.write(f"username={username or 'oauth'}
+    sys.stdout.write(f"username={username or 'oauth'}\n")
 
-")
-
-    sys.stdout.write(f"token={token}
-
-")
+    sys.stdout.write(f"token={token}\n")
 
 PY
 
@@ -412,9 +400,7 @@ PY
 
                 username)
 
-                  printf 'EFFECTIVE_REGISTRY_USER=%s
-
-' "$value" >> "$GITHUB_ENV"
+                  printf 'EFFECTIVE_REGISTRY_USER=%s\n' "$value" >> "$GITHUB_ENV"
 
                   ;;
 
@@ -422,9 +408,7 @@ PY
 
                   echo "::add-mask::$value"
 
-                  printf 'EFFECTIVE_REGISTRY_PASSWORD=%s
-
-' "$value" >> "$GITHUB_ENV"
+                  printf 'EFFECTIVE_REGISTRY_PASSWORD=%s\n' "$value" >> "$GITHUB_ENV"
 
                   ;;
 
@@ -554,9 +538,7 @@ PY
 
                 if output=$(echo "${pass}" | docker login "${host}" -u "${user}" --password-stdin 2>&1); then
 
-                  printf '%s
-
-' "${output}"
+                  printf '%s\n' "${output}"
 
                   if [ "${host}" != "${REGISTRY_HOST}" ]; then
 
@@ -574,9 +556,7 @@ PY
 
                   status=$?
 
-                  printf '%s
-
-' "${output}" >&2
+                  printf '%s\n' "${output}" >&2
 
                   echo "    credential option $((idx + 1))/${#CANDIDATE_PASSWORDS[@]} failed (exit ${status})" >&2
 
