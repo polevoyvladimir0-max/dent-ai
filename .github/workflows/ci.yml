@@ -544,7 +544,7 @@ PY
 
 
 
-                if [ -n "${user}" ] || [ -n "${pass}" ]; then
+                if [ -z "${user}" ] || [ -z "${pass}" ]; then
 
                   continue
 
