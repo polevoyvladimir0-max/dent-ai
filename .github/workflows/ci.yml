@@ -630,23 +630,39 @@ jobs:
 
         shell: pwsh
 
+        env:
+
+          REGISTRY_URL: ${{ secrets.REGISTRY_URL }}
+
+          REGISTRY_USER: ${{ secrets.REGISTRY_USER }}
+
+          REGISTRY_PASSWORD: ${{ secrets.REGISTRY_PASSWORD }}
+
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+
+          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
+
         run: |
 
           $payload = @{
 
-            REGISTRY_URL    = "${{ secrets.REGISTRY_URL }}"
+            REGISTRY_URL    = [string]$env:REGISTRY_URL
 
-            REGISTRY_USER   = "${{ secrets.REGISTRY_USER }}"
+            REGISTRY_USER   = [string]$env:REGISTRY_USER
 
-            REGISTRY_PASSWORD = "${{ secrets.REGISTRY_PASSWORD }}"
+            REGISTRY_PASSWORD = [string]$env:REGISTRY_PASSWORD
 
-            DEPLOY_HOST     = "${{ secrets.DEPLOY_HOST }}"
+            DEPLOY_HOST     = [string]$env:DEPLOY_HOST
 
-            DEPLOY_USER     = "${{ secrets.DEPLOY_USER }}"
+            DEPLOY_USER     = [string]$env:DEPLOY_USER
 
-            DEPLOY_SSH_KEY  = "${{ secrets.DEPLOY_SSH_KEY }}"
+            DEPLOY_SSH_KEY  = [string]$env:DEPLOY_SSH_KEY
 
-            DEPLOY_PATH     = "${{ secrets.DEPLOY_PATH }}"
+            DEPLOY_PATH     = [string]$env:DEPLOY_PATH
 
           }
 
