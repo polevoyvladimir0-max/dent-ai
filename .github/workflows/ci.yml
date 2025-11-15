@@ -612,6 +612,8 @@ jobs:
 
     runs-on: ubuntu-24.04
 
+    timeout-minutes: 45
+
     permissions:
 
       contents: read
@@ -745,6 +747,8 @@ jobs:
           username: ${{ secrets.DEPLOY_USER }}
 
           key: ${{ secrets.DEPLOY_SSH_KEY }}
+
+          command_timeout: 45m
 
           envs: REGISTRY_URL,REGISTRY_USER,REGISTRY_PASSWORD,EFFECTIVE_REGISTRY_USER,EFFECTIVE_REGISTRY_PASSWORD,DEPLOY_PATH
 
