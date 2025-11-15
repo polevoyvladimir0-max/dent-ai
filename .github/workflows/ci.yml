@@ -794,9 +794,51 @@ jobs:
 
             docker compose up -d --remove-orphans
 
-            sleep 20
+            HEALTH_URL="http://127.0.0.1:8000/ping"
 
-            curl --fail --max-time 10 http://127.0.0.1:8000/ping
+            HEALTH_TIMEOUT=600
+
+            HEALTH_INTERVAL=10
+
+            DEADLINE=$(( $(date +%s) + HEALTH_TIMEOUT ))
+
+            HEALTH_OK=0
+
+            while [ "$(date +%s)" -lt "$DEADLINE" ]; do
+
+              if curl --silent --show-error --fail --max-time 10 "$HEALTH_URL"; then
+
+                echo "Application health check passed"
+
+                HEALTH_OK=1
+
+                break
+
+              fi
+
+              echo "Application not ready yet, retrying in ${HEALTH_INTERVAL}s..."
+
+              sleep "$HEALTH_INTERVAL"
+
+            done
+
+            if [ "$HEALTH_OK" -ne 1 ]; then
+
+              echo "Application failed health check after ${HEALTH_TIMEOUT}s" >&2
+
+              docker compose ps || true
+
+              docker compose logs --tail=200 app || true
+
+              if docker compose ps vault >/dev/null 2>&1; then
+
+                docker compose exec -T vault vault status || true
+
+              fi
+
+              exit 1
+
+            fi
 
             docker image prune -f
 
