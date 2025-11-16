@@ -28,7 +28,7 @@ from faster_whisper import WhisperModel
 from .config import BotConfig
 from pdf_generator import generate_pdf
 from db import SessionLocal, Doctor, Patient, Session as DBSession, TreatmentPlan, PlanFeedback
-from scripts.search_price import load_items, search_by_query
+from scripts.search_price import load_items, search_by_query, warm_up
 import json
 
 AGENT_TIMEOUT_SECONDS = 25.0
@@ -217,7 +217,6 @@ def format_doctor_display_obj(
     header = ", ".join(parts) if parts else "врач"
     return f"{header} {name}".strip()
 
-
 async def suggest_codes_from_text(text_query: str) -> List[Dict[str, Any]]:
     alias_codes = match_aliases(text_query)
     results: List[Dict[str, Any]] = []
@@ -278,6 +277,14 @@ def load_items_cached() -> Dict[str, Dict[str, Any]]:
             }
         load_items_cached._cache = cache
     return load_items_cached._cache
+
+
+try:
+    logging.info("Preloading semantic search resources...")
+    load_items_cached()
+    warm_up()
+except Exception as preload_exc:
+    logging.warning("Semantic search warm-up failed: %s", preload_exc)
 
 
 async def process_codes(message: Message, state: FSMContext, codes: List[str]) -> None:
@@ -696,6 +703,13 @@ async def handle_intake(message: Message, state: FSMContext):
 @dp.message(SessionState.plan_codes)
 async def handle_plan_codes(message: Message, state: FSMContext):
     raw = message.text.strip()
+
+    if not re.search(r"[\wа-яА-ЯёЁ]", raw) or len(raw) < 2:
+        await message.answer(
+            "Нужна более конкретная формулировка. Опиши услугу словами (например: 'имплантат Straumann').",
+            reply_markup=MAIN_KEYBOARD,
+        )
+        return
     codes = parse_codes(raw)
 
     if not codes:
@@ -704,7 +718,7 @@ async def handle_plan_codes(message: Message, state: FSMContext):
             picks = await suggest_codes_from_text(raw)
         except SemanticSearchUnavailable:
             await message.answer(
-                "⚠️ Семантический поиск временно недоступен. Попробуй ввести коды вручную или повтори запрос позже.",
+                "⚠️ Не получилось подобрать услуги по описанию. Попробуй сформулировать иначе или введи коды вручную.",
                 reply_markup=MAIN_KEYBOARD,
             )
             return

@@ -33,6 +33,13 @@ _model_cache: Optional[SentenceTransformer] = None
 _guidelines_cache: Optional[List[dict]] = None
 
 
+def warm_up() -> None:
+    """Preload pricing data, embedding model and guidelines."""
+    load_items()
+    load_model()
+    load_guidelines()
+
+
 def load_items() -> pd.DataFrame:
     global _items_cache
     if _items_cache is None:
