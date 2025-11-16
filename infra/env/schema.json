@@ -27,6 +27,12 @@
       "VAULT_ADDR",
       "VAULT_HOST_PORT",
       "VAULT_TOKEN",
+      "VAULT_UNSEAL_STRATEGY",
+      "VAULT_UNSEAL_LOCKBOX_SECRET_ID",
+      "VAULT_UNSEAL_LOCKBOX_ENTRY_PREFIX",
+      "VAULT_UNSEAL_SA_KEY_FILE",
+      "VAULT_UNSEAL_FILE",
+      "YC_BIN",
       "OTEL_EXPORTER_OTLP_ENDPOINT",
       "BOT_TOKEN",
       "GRAFANA_PORT",
@@ -216,6 +222,47 @@
       "description": "Токен для доступа приложения к Vault",
       "required": false,
       "secret": true,
+      "scopes": ["compose"]
+    },
+    "VAULT_UNSEAL_STRATEGY": {
+      "description": "Стратегия автоматического расширения Vault (lockbox/file/disabled)",
+      "default": "lockbox",
+      "required": false,
+      "scopes": ["compose"],
+      "pattern": "^(lockbox|file|disabled)$"
+    },
+    "VAULT_UNSEAL_LOCKBOX_SECRET_ID": {
+      "description": "ID секрета Yandex Lockbox с шардами для unseal",
+      "required": false,
+      "secret": true,
+      "scopes": ["compose"],
+      "pattern": "^[A-Za-z0-9_-]{20,}$"
+    },
+    "VAULT_UNSEAL_LOCKBOX_ENTRY_PREFIX": {
+      "description": "Префикс ключей в Lockbox (по умолчанию vault-unseal-key-)",
+      "default": "vault-unseal-key-",
+      "required": false,
+      "scopes": ["compose"],
+      "pattern": "^[A-Za-z0-9_.-]+$"
+    },
+    "VAULT_UNSEAL_SA_KEY_FILE": {
+      "description": "Путь до JSON ключа сервисного аккаунта, которому разрешен доступ к Lockbox",
+      "default": "/etc/dent-ai/lockbox-sa-key.json",
+      "required": false,
+      "scopes": ["compose"],
+      "pattern": "^/.+\\.json$"
+    },
+    "VAULT_UNSEAL_FILE": {
+      "description": "Локальный путь к файлу с шардерами (используется при стратегии file)",
+      "required": false,
+      "secret": true,
+      "scopes": ["compose"],
+      "pattern": "^/.+"
+    },
+    "YC_BIN": {
+      "description": "Полный путь до yc CLI (нужно для lockbox auto-unseal)",
+      "default": "yc",
+      "required": false,
       "scopes": ["compose"]
     },
     "OTEL_EXPORTER_OTLP_ENDPOINT": {

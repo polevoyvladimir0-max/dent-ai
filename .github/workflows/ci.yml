@@ -794,6 +794,8 @@ jobs:
 
             docker compose up -d --remove-orphans
 
+            sudo env "PROJECT_DIR=$DEPLOY_PATH" "ENV_FILE=$DEPLOY_PATH/.env" bash ./infra/scripts/vault-auto-unseal.sh
+
             HEALTH_URL="http://127.0.0.1:8000/ping"
 
             HEALTH_TIMEOUT=600
