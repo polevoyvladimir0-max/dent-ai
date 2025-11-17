@@ -26,6 +26,7 @@ from aiogram.types import (
 from faster_whisper import WhisperModel
 
 from .config import BotConfig
+from .utils.llm import YandexGPTClient
 from pdf_generator import generate_pdf
 from db import SessionLocal, Doctor, Patient, Session as DBSession, TreatmentPlan, PlanFeedback
 from scripts.search_price import load_items, search_by_query, warm_up
@@ -287,6 +288,113 @@ except Exception as preload_exc:
     logging.warning("Semantic search warm-up failed: %s", preload_exc)
 
 
+LLM_ENABLED = bool(config.yandex_gpt_api_key and config.yandex_gpt_folder_id)
+LLM_TYPING_INTERVAL = 2.5
+LLM_CLIENT = (
+    YandexGPTClient(
+        api_key=config.yandex_gpt_api_key,
+        folder_id=config.yandex_gpt_folder_id,
+        model=config.yandex_gpt_model,
+        timeout=config.yandex_gpt_timeout,
+    )
+    if LLM_ENABLED
+    else None
+)
+
+
+def shorten_text(value: str, limit: int = 320) -> str:
+    clean = (value or "").strip()
+    if len(clean) <= limit:
+        return clean
+    return clean[: limit - 1] + "…"
+
+
+async def _typing_loop(chat_id: int) -> None:
+    while True:
+        await bot.send_chat_action(chat_id, "typing")
+        await asyncio.sleep(LLM_TYPING_INTERVAL)
+
+
+async def with_typing_action(chat_id: int, coro):
+    task = asyncio.create_task(_typing_loop(chat_id))
+    try:
+        return await coro
+    finally:
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+
+
+def build_smalltalk_prompts(scenario: str, **context: Any) -> Optional[tuple[str, str]]:
+    if scenario == "greeting":
+        doctor = context.get("doctor") or "коллега"
+        specialization = context.get("specialization")
+        spec_text = f", {specialization}" if specialization else ""
+        return (
+            "Ты дружелюбный и профессиональный ассистент стоматолога. Говори кратко: одно-два предложения.",
+            f"Доктор {doctor}{spec_text} вернулся в чат и готов составлять планы. Поздоровайся и напомни, что помогаешь с кодами и идеями.",
+        )
+    if scenario == "intake_ack":
+        intake = shorten_text(context.get("intake", ""))
+        if not intake:
+            return None
+        return (
+            "Ты ассистент стоматолога, поддерживаешь рабочий диалог и отвечаешь коротко.",
+            f"Я получил диктовку плана: '{intake}'. Ответь, что понял задачу и готов подобрать услуги или коды.",
+        )
+    if scenario == "codes_ack":
+        codes: List[str] = context.get("codes", [])
+        if not codes:
+            return None
+        preview = ", ".join(codes[:5])
+        return (
+            "Ты помогаешь врачу оперативно собирать план. Отвечай коротко.",
+            f"Доктор прислал коды {preview}. Ответь, что приступаешь к расчёту и можно добавлять другие позиции, если потребуется.",
+        )
+    if scenario == "suggestions":
+        count = context.get("count", 0)
+        query = shorten_text(context.get("query", ""))
+        if not query or not count:
+            return None
+        return (
+            "Ты ассистент стоматолога. Отвечай по делу, до двух предложений.",
+            f"Я нашёл {count} подходящих услуг по описанию '{query}'. Подскажи врачу, что можно выбрать варианты из списка или уточнить запрос.",
+        )
+    if scenario == "plan_summary":
+        total = context.get("total")
+        items = context.get("items", 0)
+        if total is None:
+            return None
+        try:
+            total_text = f"{float(total):.2f} ₽"
+        except Exception:
+            total_text = str(total)
+        return (
+            "Ты ассистент стоматолога, комментируешь результат кратко.",
+            f"План обновлён: {items} позиций, сумма {total_text}. Попроси подтвердить или продолжить работу.",
+        )
+    return None
+
+
+async def maybe_smalltalk(message: Message, scenario: str, reply_markup=None, **context: Any) -> None:
+    if not LLM_CLIENT:
+        return
+    prompts = build_smalltalk_prompts(scenario, **context)
+    if not prompts:
+        return
+    system_prompt, user_prompt = prompts
+    try:
+        response = await with_typing_action(
+            message.chat.id,
+            asyncio.wait_for(LLM_CLIENT.smalltalk(system_prompt, user_prompt), config.yandex_gpt_timeout),
+        )
+    except Exception as exc:
+        logging.debug("LLM smalltalk failed (%s): %s", scenario, exc)
+        return
+    if response:
+        await message.answer(response, reply_markup=reply_markup)
+
+
 async def process_codes(message: Message, state: FSMContext, codes: List[str]) -> None:
     data = await state.get_data()
     existing_codes: List[str] = data.get("codes", [])
@@ -365,6 +473,13 @@ async def process_codes(message: Message, state: FSMContext, codes: List[str]) -
 
     await message.answer(summary, reply_markup=MAIN_KEYBOARD)
     await message.answer(agent_text)
+    await maybe_smalltalk(
+        message,
+        "plan_summary",
+        reply_markup=None,
+        total=combined_plan.get("total"),
+        items=len(combined_plan.get("items", [])),
+    )
     await message.answer(
         "Продолжить добавление услуг или завершить план? Напиши 'продолжить' или 'завершить'.",
         reply_markup=MAIN_KEYBOARD,
@@ -561,6 +676,13 @@ async def cmd_start(message: Message, state: FSMContext):
             f"👋 Привет, {doctor.name}! Продолжаем. Укажи пациента (ФИО/ID).",
             reply_markup=MAIN_KEYBOARD,
         )
+        await maybe_smalltalk(
+            message,
+            "greeting",
+            reply_markup=None,
+            doctor=doctor.name,
+            specialization=doctor.specialization,
+        )
         await state.set_state(SessionState.patient)
         return
 
@@ -687,6 +809,7 @@ async def handle_voice(message: Message, state: FSMContext):
         f"🎙 Распознал: {text}\n\nТеперь отправь коды или опиши услуги (например: 'имплантат Straumann', 'коронка диоксид').",
         reply_markup=MAIN_KEYBOARD,
     )
+    await maybe_smalltalk(message, "intake_ack", reply_markup=None, intake=text)
     await state.set_state(SessionState.plan_codes)
 
 
@@ -697,6 +820,7 @@ async def handle_intake(message: Message, state: FSMContext):
         "Отлично. Теперь отправь коды услуг или опиши словами (например: 'имплантат Straumann').",
         reply_markup=MAIN_KEYBOARD,
     )
+    await maybe_smalltalk(message, "intake_ack", reply_markup=None, intake=message.text.strip())
     await state.set_state(SessionState.plan_codes)
 
 
@@ -735,9 +859,11 @@ async def handle_plan_codes(message: Message, state: FSMContext):
             f"{options}\n\nНапиши номера через запятую (например: 1,3).",
             reply_markup=MAIN_KEYBOARD,
         )
+        await maybe_smalltalk(message, "suggestions", reply_markup=None, query=raw, count=len(picks))
         await state.set_state(SessionState.plan_disambiguation)
         return
 
+    await maybe_smalltalk(message, "codes_ack", reply_markup=None, codes=codes)
     await process_codes(message, state, codes)
 
 

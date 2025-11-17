@@ -48,6 +48,12 @@ pwsh ./infra/scripts/generate-env.ps1 -Target compose -SecretsPath ./infra/env/s
 - `VAULT_UNSEAL_FILE` — fallback на локальный файл (если стратегия `file`).
 - `YC_BIN` — полный путь до `yc` (если CLI стоит не в системном PATH).
 
+## YandexGPT
+- `YANDEX_GPT_API_KEY` — API-ключ YandexGPT (выдаём сервисному аккаунту роль `ai.languageModels.user`).
+- `YANDEX_GPT_FOLDER_ID` — ID каталога, где доступна модель.
+- `YANDEX_GPT_MODEL` — имя модели (`yandexgpt-lite`, `yandexgpt/latest` и т.п.).
+- `YANDEX_GPT_TIMEOUT` — таймаут ожидания ответа (сек).
+
 Скрипт `infra/scripts/vault-auto-unseal.sh` вызывается деплой-джобой после `docker compose up`, поэтому после рестарта/деплоя Vault автоматически разблокируется, если:
 1. На сервере установлен `yc` CLI (`curl https://storage.yandexcloud.net/yandexcloud-yc/install.sh | bash`).
 2. Есть `jq` (`sudo apt-get install jq`).

@@ -35,6 +35,10 @@
       "YC_BIN",
       "OTEL_EXPORTER_OTLP_ENDPOINT",
       "BOT_TOKEN",
+      "YANDEX_GPT_API_KEY",
+      "YANDEX_GPT_FOLDER_ID",
+      "YANDEX_GPT_MODEL",
+      "YANDEX_GPT_TIMEOUT",
       "GRAFANA_PORT",
       "GRAFANA_ADMIN_USER",
       "GRAFANA_ADMIN_PASSWORD",
@@ -278,6 +282,34 @@
       "secret": true,
       "scopes": ["compose"],
       "pattern": "^\\d{6,}:[A-Za-z0-9_-]{30,}$"
+    },
+    "YANDEX_GPT_API_KEY": {
+      "description": "API-ключ YandexGPT (для оживления диалогов)",
+      "required": false,
+      "secret": true,
+      "scopes": ["compose"],
+      "pattern": "^[A-Za-z0-9_-]{20,}$"
+    },
+    "YANDEX_GPT_FOLDER_ID": {
+      "description": "ID каталога Yandex Cloud, где доступен YandexGPT",
+      "required": false,
+      "secret": true,
+      "scopes": ["compose"],
+      "pattern": "^[A-Za-z0-9-]{10,}$"
+    },
+    "YANDEX_GPT_MODEL": {
+      "description": "Имя модели YandexGPT (например yandexgpt-lite или yandexgpt/latest)",
+      "default": "yandexgpt-lite",
+      "required": false,
+      "scopes": ["compose"],
+      "pattern": "^[A-Za-z0-9./_-]+$"
+    },
+    "YANDEX_GPT_TIMEOUT": {
+      "description": "Таймаут ожидания ответа YandexGPT в секундах",
+      "default": "6.0",
+      "required": false,
+      "scopes": ["compose"],
+      "pattern": "^\\d+(\\.\\d+)?$"
     },
     "GRAFANA_PORT": {
       "description": "Порт графаны на хосте",
