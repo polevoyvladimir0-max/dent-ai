@@ -424,6 +424,48 @@ jobs:
 
 
 
+      - name: Build and push base image
+
+        id: build_base
+
+        uses: docker/build-push-action@v6
+
+        with:
+
+          context: .
+
+          file: infra/docker/base.Dockerfile
+
+          push: true
+
+          platforms: ${{ env.PLATFORMS }}
+
+          tags: |
+
+            ${{ env.REGISTRY }}/dent-ai/base:${{ env.IMAGE_TAG }}
+
+            ${{ env.REGISTRY }}/dent-ai/base:latest
+
+          cache-from: type=gha,scope=base
+
+          cache-to: type=gha,scope=base,mode=max
+
+          provenance: true
+
+          sbom: true
+
+
+
+      - name: Sign base image
+
+        env:
+
+          COSIGN_YES: "true"
+
+        run: cosign sign --yes ${{ env.REGISTRY }}/dent-ai/base@${{ steps.build_base.outputs.digest }}
+
+
+
       - name: Build and push app image
 
         id: build_app
@@ -439,6 +481,10 @@ jobs:
           push: true
 
           platforms: ${{ env.PLATFORMS }}
+
+          build-args: |
+
+            BASE_IMAGE=${{ env.REGISTRY }}/dent-ai/base:${{ env.IMAGE_TAG }}
 
           tags: |
 
@@ -493,6 +539,10 @@ jobs:
           push: true
 
           platforms: ${{ env.PLATFORMS }}
+
+          build-args: |
+
+            BASE_IMAGE=${{ env.REGISTRY }}/dent-ai/base:${{ env.IMAGE_TAG }}
 
           tags: |
 
@@ -787,6 +837,10 @@ jobs:
             fi
 
             printf '%s' "$LOGIN_PASS" | docker login "$REGISTRY" -u "$LOGIN_USER" --password-stdin
+
+            BASE_IMAGE="${REGISTRY}/dent-ai/base:${IMAGE_TAG}"
+
+            docker pull "${BASE_IMAGE}" || docker pull "${REGISTRY}/dent-ai/base:latest"
 
             export APP_IMAGE BOT_IMAGE BACKUP_IMAGE
 
