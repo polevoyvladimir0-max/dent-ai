@@ -56,3 +56,16 @@ create table if not exists plan_feedback (
     diff_json json,
     created_at text default (datetime('now'))
 );
+
+create table if not exists plan_templates (
+    id integer primary key,
+    doctor_id integer not null references doctors(id) on delete cascade,
+    ideological_plan text not null,
+    codes_sequence text not null,
+    metadata text default '{}',
+    qdrant_point_id integer unique,
+    usage_count integer default 1,
+    source_plan_id integer references treatment_plans(id),
+    created_at text default (datetime('now')),
+    updated_at text default (datetime('now'))
+);

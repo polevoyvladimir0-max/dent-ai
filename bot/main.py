@@ -3,6 +3,7 @@ import logging
 import os
 import re
 from contextlib import suppress, contextmanager
+from datetime import datetime
 from pathlib import Path
 from typing import List, Optional, Dict, Any
 
@@ -23,13 +24,13 @@ from aiogram.types import (
     BotCommand,
 )
 
-from faster_whisper import WhisperModel
-
 from .config import BotConfig
 from .utils.llm import YandexGPTClient
+from .utils.voice import download_voice, transcribe_voice
 from pdf_generator import generate_pdf
-from db import SessionLocal, Doctor, Patient, Session as DBSession, TreatmentPlan, PlanFeedback
+from db import SessionLocal, Doctor, Patient, Session as DBSession, TreatmentPlan, PlanFeedback, PlanTemplate
 from scripts.search_price import load_items, search_by_query, warm_up
+from scripts.search_plan_templates import save_template_embedding, search_similar_templates
 import json
 
 AGENT_TIMEOUT_SECONDS = 25.0
@@ -61,13 +62,6 @@ class SemanticSearchUnavailable(Exception):
 config = BotConfig.from_env()
 bot = Bot(token=config.token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher(storage=MemoryStorage())
-
-VOICE_MODEL_NAME = os.getenv("WHISPER_MODEL", "small")
-VOICE_DEVICE = os.getenv("WHISPER_DEVICE", "cpu")
-VOICE_COMPUTE_TYPE = os.getenv("WHISPER_COMPUTE", "int8_float32")
-VOICE_MODEL = WhisperModel(VOICE_MODEL_NAME, device=VOICE_DEVICE, compute_type=VOICE_COMPUTE_TYPE)
-AUDIO_DIR = Path(os.getenv("VOICE_STORAGE", BASE_DIR / "voice"))
-AUDIO_DIR.mkdir(parents=True, exist_ok=True)
 
 SEMANTIC_TIMEOUT_SECONDS = float(os.getenv("SEMANTIC_TIMEOUT_SECONDS", "6.0"))
 
@@ -151,6 +145,7 @@ class SessionState(StatesGroup):
     patient = State()
     card_number = State()
     intake = State()
+    template_selection = State()  # Выбор шаблона плана из истории
     plan_codes = State()
     plan_disambiguation = State()
     plan_confirm = State()
@@ -217,6 +212,65 @@ def format_doctor_display_obj(
 
     header = ", ".join(parts) if parts else "врач"
     return f"{header} {name}".strip()
+
+async def search_similar_plan_templates(
+    ideological_plan: str,
+    doctor_id: int,
+    top_k: int = 3,
+    score_threshold: float = 0.7,
+) -> List[Dict[str, Any]]:
+    """
+    Ищет похожие шаблоны планов в истории врача по идеологическому запросу.
+    
+    Returns:
+        Список похожих шаблонов с их метаданными (codes_sequence, metadata, score)
+    """
+    if not ideological_plan or not doctor_id:
+        return []
+    
+    try:
+        loop = asyncio.get_running_loop()
+        
+        def _search():
+            return search_similar_templates(
+                query=ideological_plan,
+                doctor_id=doctor_id,
+                top_k=top_k,
+                score_threshold=score_threshold,
+            )
+        
+        try:
+            results = await asyncio.wait_for(
+                loop.run_in_executor(None, _search),
+                timeout=6.0,  # Timeout для поиска шаблонов
+            )
+        except asyncio.TimeoutError:
+            logging.warning(f"Template search timed out for doctor {doctor_id}")
+            return []
+        except Exception as exc:
+            logging.exception(f"Template search failed for doctor {doctor_id}: {exc}")
+            return []
+        
+        templates = []
+        for point in results:
+            payload = point.payload or {}
+            template_id = payload.get("template_id")
+            if not template_id:
+                continue
+            
+            templates.append({
+                "template_id": template_id,
+                "ideological_plan": payload.get("ideological_plan", ""),
+                "codes_sequence": payload.get("codes_sequence", []),
+                "metadata": payload.get("metadata", {}),
+                "score": point.score,
+            })
+        
+        return templates
+    except Exception as exc:
+        logging.exception(f"Failed to search similar templates: {exc}")
+        return []
+
 
 async def suggest_codes_from_text(text_query: str) -> List[Dict[str, Any]]:
     alias_codes = match_aliases(text_query)
@@ -374,6 +428,32 @@ def build_smalltalk_prompts(scenario: str, **context: Any) -> Optional[tuple[str
             f"План обновлён: {items} позиций, сумма {total_text}. Попроси подтвердить или продолжить работу.",
         )
     return None
+
+
+async def check_commands_in_state(message: Message, state: FSMContext) -> bool:
+    """
+    Проверяет, является ли сообщение командой, и обрабатывает её.
+    Возвращает True, если команда была обработана.
+    """
+    if not message.text:
+        return False
+    
+    text_lower = message.text.strip().lower()
+    
+    if text_lower == "/start":
+        await cmd_start(message, state)
+        return True
+    if text_lower in {"/profile", "обновить профиль"}:
+        await update_profile(message, state)
+        return True
+    if text_lower in {"/newplan", "новый план"}:
+        await start_new_plan(message, state)
+        return True
+    if text_lower in {"/help", "подсказки"}:
+        await show_help(message)
+        return True
+    
+    return False
 
 
 async def maybe_smalltalk(message: Message, scenario: str, reply_markup=None, **context: Any) -> None:
@@ -535,6 +615,104 @@ async def finalize_current_plan(message: Message, state: FSMContext) -> None:
     caption = f"Готово. Итоговая сумма: {total_value:.2f} ₽"
     await message.answer_document(FSInputFile(str(pdf_path)), caption=caption)
 
+    # Сохраняем шаблон плана для обучения модели на предпочтениях врача
+    doctor_id = data.get("doctor_id")
+    ideological_plan = data.get("intake", "").strip()
+    all_codes = data.get("codes", [])
+    template_adapted = data.get("template_adapted", False)
+    selected_template_id = data.get("selected_template_id")
+    
+    if doctor_id and ideological_plan and all_codes:
+        try:
+            # Извлекаем последовательность кодов из плана (в порядке добавления)
+            plan_items = plan.get("items", [])
+            codes_sequence = [item.get("code") for item in plan_items if item.get("code")]
+            
+            if codes_sequence:
+                with get_db() as db:
+                    # Проверяем, существует ли уже такой шаблон
+                    existing_template = db.query(PlanTemplate).filter_by(
+                        doctor_id=doctor_id,
+                        ideological_plan=ideological_plan,
+                    ).first()
+                    
+                    if existing_template:
+                        # Если шаблон был адаптирован из другого шаблона - создаём новый шаблон с новой формулировкой
+                        if template_adapted and selected_template_id and selected_template_id != existing_template.id:
+                            # Создаём новый шаблон с новой формулировкой для обучения
+                            new_template = PlanTemplate(
+                                doctor_id=doctor_id,
+                                ideological_plan=ideological_plan,
+                                codes_sequence=codes_sequence,
+                                plan_metadata=extract_plan_metadata(ideological_plan, plan_items),
+                                source_plan_id=plan_id,
+                                usage_count=1,
+                            )
+                            db.add(new_template)
+                            db.flush()
+                            new_template_id = new_template.id
+                            db.commit()
+                            logging.info(
+                                f"Created adapted template {new_template_id} from template {selected_template_id} for doctor {doctor_id}"
+                            )
+                            
+                            # Сохраняем эмбеддинг в Qdrant
+                            try:
+                                loop = asyncio.get_event_loop()
+                                loop.run_in_executor(
+                                    None,
+                                    save_template_embedding,
+                                    new_template_id,
+                                    ideological_plan,
+                                    doctor_id,
+                                    codes_sequence,
+                                    extract_plan_metadata(ideological_plan, plan_items),
+                                )
+                            except Exception as qdrant_exc:
+                                logging.warning(f"Failed to save adapted template {new_template_id} to Qdrant: {qdrant_exc}")
+                        else:
+                            # Увеличиваем счётчик использования существующего шаблона
+                            existing_template.usage_count += 1
+                            existing_template.updated_at = datetime.utcnow()
+                            template_id = existing_template.id
+                            db.commit()
+                            logging.info(f"Updated existing template {template_id} for doctor {doctor_id}")
+                    else:
+                        # Создаём новый шаблон
+                        # Извлекаем метаданные из идеологического плана
+                        plan_metadata = extract_plan_metadata(ideological_plan, plan_items)
+                        
+                        new_template = PlanTemplate(
+                            doctor_id=doctor_id,
+                            ideological_plan=ideological_plan,
+                            codes_sequence=codes_sequence,
+                            plan_metadata=plan_metadata,
+                            source_plan_id=plan_id,
+                            usage_count=1,
+                        )
+                        db.add(new_template)
+                        db.flush()
+                        template_id = new_template.id
+                        db.commit()
+                        logging.info(f"Created new template {template_id} for doctor {doctor_id}")
+                        
+                        # Сохраняем эмбеддинг в Qdrant асинхронно (в фоне)
+                        try:
+                            loop = asyncio.get_event_loop()
+                            loop.run_in_executor(
+                                None,
+                                save_template_embedding,
+                                template_id,
+                            ideological_plan,
+                            doctor_id,
+                            codes_sequence,
+                            extract_plan_metadata(ideological_plan, plan_items),
+                            )
+                        except Exception as qdrant_exc:
+                            logging.warning(f"Failed to save template {template_id} to Qdrant: {qdrant_exc}")
+        except Exception as template_exc:
+            logging.exception(f"Failed to save plan template: {template_exc}")
+
     base_state = {key: data[key] for key in ("doctor", "doctor_id", "doctor_full_display") if data.get(key)}
     await state.set_data(base_state)
     await message.answer(
@@ -542,6 +720,46 @@ async def finalize_current_plan(message: Message, state: FSMContext) -> None:
         reply_markup=MAIN_KEYBOARD,
     )
     await state.set_state(SessionState.patient)
+
+
+def extract_plan_metadata(ideological_plan: str, plan_items: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """
+    Извлекает метаданные из идеологического плана и элементов плана.
+    
+    Метаданные включают:
+    - Бренды (Straumann, Astra, Nobel и т.д.)
+    - Локализацию (зуб 2.5, зуб 3.5 и т.д.)
+    - Особенности (одномоментная, отсроченная и т.д.)
+    """
+    metadata: Dict[str, Any] = {}
+    text_lower = ideological_plan.lower()
+    
+    # Извлекаем бренды из текста
+    brands = []
+    brand_keywords = ["straumann", "astra", "nobel", "osstem", "bicon", "implantium", "e.max", "металлокерамика"]
+    for brand in brand_keywords:
+        if brand in text_lower:
+            brands.append(brand.title())
+    if brands:
+        metadata["brands"] = brands
+    
+    # Извлекаем локализацию (номер зуба)
+    tooth_match = re.search(r"зуб\s*(\d+\.?\d*)", text_lower)
+    if tooth_match:
+        metadata["location"] = tooth_match.group(1)
+    
+    # Извлекаем особенности
+    features = []
+    if "одномоментн" in text_lower:
+        features.append("одномоментная")
+    if "отсроченн" in text_lower:
+        features.append("отсроченная")
+    if "немедленн" in text_lower:
+        features.append("немедленная нагрузка")
+    if features:
+        metadata["features"] = features
+    
+    return metadata
 
 
 def combine_plans(existing: Optional[dict], new_part: dict, order_sequence: List[str]) -> dict:
@@ -694,6 +912,10 @@ async def cmd_start(message: Message, state: FSMContext):
 
 @dp.message(SessionState.doctor_name)
 async def handle_doctor_name(message: Message, state: FSMContext):
+    # Проверяем команды - они имеют приоритет над FSM состояниями
+    if await check_commands_in_state(message, state):
+        return
+    
     doctor_name = message.text.strip()
     telegram_id = str(message.from_user.id)
     with get_db() as db:
@@ -713,6 +935,10 @@ async def handle_doctor_name(message: Message, state: FSMContext):
 
 @dp.message(SessionState.doctor_specialization)
 async def handle_specialization(message: Message, state: FSMContext):
+    # Проверяем команды
+    if await check_commands_in_state(message, state):
+        return
+    
     specialization = message.text.strip()
     await state.update_data(specialization=specialization)
     await message.answer("Ученая степень (например: к.м.н. или напиши 'нет').", reply_markup=MAIN_KEYBOARD)
@@ -721,6 +947,10 @@ async def handle_specialization(message: Message, state: FSMContext):
 
 @dp.message(SessionState.doctor_degree)
 async def handle_degree(message: Message, state: FSMContext):
+    # Проверяем команды
+    if await check_commands_in_state(message, state):
+        return
+    
     degree = message.text.strip()
     await state.update_data(degree=degree)
     await message.answer("Квалификационная категория (высшая/первая/вторая/нет).", reply_markup=MAIN_KEYBOARD)
@@ -729,6 +959,10 @@ async def handle_degree(message: Message, state: FSMContext):
 
 @dp.message(SessionState.doctor_category)
 async def handle_category(message: Message, state: FSMContext):
+    # Проверяем команды
+    if await check_commands_in_state(message, state):
+        return
+    
     category = message.text.strip()
     await state.update_data(category=category)
     await message.answer("Стаж (в годах).", reply_markup=MAIN_KEYBOARD)
@@ -737,6 +971,10 @@ async def handle_category(message: Message, state: FSMContext):
 
 @dp.message(SessionState.doctor_experience)
 async def handle_experience(message: Message, state: FSMContext):
+    # Проверяем команды
+    if await check_commands_in_state(message, state):
+        return
+    
     raw = message.text.strip()
     try:
         experience = float(raw.replace(',', '.'))
@@ -778,6 +1016,10 @@ async def handle_experience(message: Message, state: FSMContext):
 
 @dp.message(SessionState.patient)
 async def handle_patient(message: Message, state: FSMContext):
+    # Проверяем команды
+    if await check_commands_in_state(message, state):
+        return
+    
     patient_name = message.text.strip()
     await state.update_data(patient=patient_name)
     await message.answer("📄 Номер амбулаторной карты?", reply_markup=MAIN_KEYBOARD)
@@ -785,6 +1027,10 @@ async def handle_patient(message: Message, state: FSMContext):
 
 @dp.message(SessionState.card_number)
 async def handle_card(message: Message, state: FSMContext):
+    # Проверяем команды
+    if await check_commands_in_state(message, state):
+        return
+    
     card_number = message.text.strip()
     data = await state.get_data()
     patient_name = data.get("patient", "")
@@ -802,9 +1048,65 @@ async def handle_card(message: Message, state: FSMContext):
 @dp.message(SessionState.intake, F.voice)
 async def handle_voice(message: Message, state: FSMContext):
     await message.answer("⌛ Распознаю аудио...")
-    file_path = await download_voice(message)
-    text = await transcribe_voice(file_path)
-    await state.update_data(intake=text)
+    try:
+        file_path = await download_voice(bot, message)
+        text = await transcribe_voice(file_path)
+    except Exception as voice_exc:
+        logging.exception(f"Voice transcription failed: {voice_exc}")
+        await message.answer(
+            "❌ Не удалось распознать голосовое сообщение. "
+            "Попробуй отправить текст или записать голосовое сообщение заново.",
+            reply_markup=MAIN_KEYBOARD,
+        )
+        return
+    ideological_plan = text
+    await state.update_data(intake=ideological_plan)
+    
+    data = await state.get_data()
+    doctor_id = data.get("doctor_id")
+    
+    # Ищем похожие шаблоны планов в истории врача
+    similar_templates = []
+    if doctor_id and ideological_plan:
+        await message.answer("🔍 Ищу похожие планы в истории...")
+        similar_templates = await search_similar_plan_templates(
+            ideological_plan=ideological_plan,
+            doctor_id=doctor_id,
+            top_k=3,
+            score_threshold=0.7,
+        )
+    
+    # Если найдены похожие шаблоны - предлагаем врачу выбрать
+    if similar_templates:
+        await state.update_data(similar_templates=similar_templates)
+        
+        options = []
+        for idx, template in enumerate(similar_templates, start=1):
+            plan_text = template["ideological_plan"]
+            codes_count = len(template.get("codes_sequence", []))
+            score = template.get("score", 0.0)
+            score_percent = int(score * 100)
+            
+            # Обрезаем длинный текст
+            plan_preview = plan_text[:80] + "..." if len(plan_text) > 80 else plan_text
+            
+            options.append(
+                f"{idx}. {plan_preview}\n"
+                f"   Кодов: {codes_count}, схожесть: {score_percent}%"
+            )
+        
+        options_text = "\n\n".join(options)
+        await message.answer(
+            f"🎙 Распознал: {text}\n\n"
+            f"📋 Нашёл похожие планы в истории:\n\n{options_text}\n\n"
+            "Выбери номер плана для использования или напиши 'новый' для создания нового плана.",
+            reply_markup=MAIN_KEYBOARD,
+        )
+        await maybe_smalltalk(message, "intake_ack", reply_markup=None, intake=text)
+        await state.set_state(SessionState.template_selection)
+        return
+    
+    # Если похожих шаблонов нет - продолжаем как обычно
     await message.answer(
         f"🎙 Распознал: {text}\n\nТеперь отправь коды или опиши услуги (например: 'имплантат Straumann', 'коронка диоксид').",
         reply_markup=MAIN_KEYBOARD,
@@ -815,17 +1117,183 @@ async def handle_voice(message: Message, state: FSMContext):
 
 @dp.message(SessionState.intake)
 async def handle_intake(message: Message, state: FSMContext):
-    await state.update_data(intake=message.text.strip())
+    # Проверяем команды
+    if await check_commands_in_state(message, state):
+        return
+    
+    ideological_plan = message.text.strip()
+    await state.update_data(intake=ideological_plan)
+    
+    data = await state.get_data()
+    doctor_id = data.get("doctor_id")
+    
+    # Ищем похожие шаблоны планов в истории врача
+    similar_templates = []
+    if doctor_id and ideological_plan:
+        await message.answer("🔍 Ищу похожие планы в истории...")
+        similar_templates = await search_similar_plan_templates(
+            ideological_plan=ideological_plan,
+            doctor_id=doctor_id,
+            top_k=3,
+            score_threshold=0.7,
+        )
+    
+    # Если найдены похожие шаблоны - предлагаем врачу выбрать
+    if similar_templates:
+        await state.update_data(similar_templates=similar_templates)
+        
+        options = []
+        for idx, template in enumerate(similar_templates, start=1):
+            plan_text = template["ideological_plan"]
+            codes_count = len(template.get("codes_sequence", []))
+            score = template.get("score", 0.0)
+            score_percent = int(score * 100)
+            
+            # Обрезаем длинный текст
+            plan_preview = plan_text[:80] + "..." if len(plan_text) > 80 else plan_text
+            
+            options.append(
+                f"{idx}. {plan_preview}\n"
+                f"   Кодов: {codes_count}, схожесть: {score_percent}%"
+            )
+        
+        options_text = "\n\n".join(options)
+        await message.answer(
+            f"📋 Нашёл похожие планы в истории:\n\n{options_text}\n\n"
+            "Выбери номер плана для использования или напиши 'новый' для создания нового плана.",
+            reply_markup=MAIN_KEYBOARD,
+        )
+        await maybe_smalltalk(message, "intake_ack", reply_markup=None, intake=ideological_plan)
+        await state.set_state(SessionState.template_selection)
+        return
+    
+    # Если похожих шаблонов нет - продолжаем как обычно
     await message.answer(
         "Отлично. Теперь отправь коды услуг или опиши словами (например: 'имплантат Straumann').",
         reply_markup=MAIN_KEYBOARD,
     )
-    await maybe_smalltalk(message, "intake_ack", reply_markup=None, intake=message.text.strip())
+    await maybe_smalltalk(message, "intake_ack", reply_markup=None, intake=ideological_plan)
     await state.set_state(SessionState.plan_codes)
+
+
+@dp.message(SessionState.template_selection)
+async def handle_template_selection(message: Message, state: FSMContext):
+    """Обработка выбора шаблона плана из истории."""
+    # Проверяем команды
+    if await check_commands_in_state(message, state):
+        return
+    
+    data = await state.get_data()
+    similar_templates: List[Dict[str, Any]] = data.get("similar_templates", [])
+    
+    if not similar_templates:
+        await message.answer("Шаблоны не найдены. Создаю новый план.", reply_markup=MAIN_KEYBOARD)
+        await state.set_state(SessionState.plan_codes)
+        return
+    
+    user_input = message.text.strip().lower()
+    
+    # Если пользователь хочет создать новый план
+    if user_input in {"новый", "new", "создать", "create"}:
+        await state.update_data(similar_templates=None)
+        await message.answer(
+            "Создаю новый план. Отправь коды услуг или опиши словами (например: 'имплантат Straumann').",
+            reply_markup=MAIN_KEYBOARD,
+        )
+        await state.set_state(SessionState.plan_codes)
+        return
+    
+    # Пытаемся распознать номер шаблона
+    indexes = parse_choice_indexes(user_input)
+    if not indexes or len(indexes) != 1:
+        await message.answer(
+            "Не понял выбор. Напиши номер плана (1, 2 или 3) или 'новый' для создания нового плана.",
+            reply_markup=MAIN_KEYBOARD,
+        )
+        return
+    
+    selected_idx = indexes[0]
+    if selected_idx < 0 or selected_idx >= len(similar_templates):
+        await message.answer(
+            f"Неверный номер. Выбери от 1 до {len(similar_templates)} или напиши 'новый'.",
+            reply_markup=MAIN_KEYBOARD,
+        )
+        return
+    
+    # Используем выбранный шаблон
+    selected_template = similar_templates[selected_idx]
+    original_codes = selected_template.get("codes_sequence", [])
+    original_plan = selected_template.get("ideological_plan", "")
+    
+    if not original_codes:
+        await message.answer(
+            "В выбранном шаблоне нет кодов. Создаю новый план.",
+            reply_markup=MAIN_KEYBOARD,
+        )
+        await state.update_data(similar_templates=None)
+        await state.set_state(SessionState.plan_codes)
+        return
+    
+    # Получаем новый контекст (текущий идеологический план)
+    new_context = data.get("intake", "").strip()
+    
+    # Адаптируем план под новый контекст через LLM
+    adapted_codes = original_codes
+    adapted_plan = original_plan
+    changes_text = "Использую план без изменений"
+    
+    if LLM_CLIENT and new_context and new_context != original_plan:
+        await message.answer("🔄 Адаптирую план под новый контекст...")
+        try:
+            adaptation = await with_typing_action(
+                message.chat.id,
+                asyncio.wait_for(
+                    LLM_CLIENT.adapt_plan(
+                        original_plan=original_plan,
+                        original_codes=original_codes,
+                        new_context=new_context,
+                    ),
+                    timeout=10.0,
+                ),
+            )
+            
+            if adaptation:
+                adapted_plan = adaptation.get("adapted_plan", new_context)
+                adapted_codes = adaptation.get("adapted_codes", original_codes)
+                changes_text = adaptation.get("changes", "Параметры обновлены")
+                
+                # Обновляем идеологический план в состоянии
+                await state.update_data(intake=adapted_plan)
+        except Exception as adapt_exc:
+            logging.warning(f"Plan adaptation failed: {adapt_exc}")
+            # Используем исходные коды, если адаптация не удалась
+    
+    # Сохраняем информацию о том, что использовали шаблон
+    await state.update_data(
+        selected_template_id=selected_template.get("template_id"),
+        template_source="history",
+        similar_templates=None,
+        template_adapted=True,
+    )
+    
+    # Используем коды из шаблона для создания плана
+    await message.answer(
+        f"✅ Использую план из истории:\n{adapted_plan}\n\n"
+        f"{changes_text}\n"
+        f"Применяю {len(adapted_codes)} кодов...",
+        reply_markup=MAIN_KEYBOARD,
+    )
+    
+    # Обрабатываем коды из шаблона (адаптированные или оригинальные)
+    await process_codes(message, state, adapted_codes)
 
 
 @dp.message(SessionState.plan_codes)
 async def handle_plan_codes(message: Message, state: FSMContext):
+    # Проверяем команды
+    if await check_commands_in_state(message, state):
+        return
+    
     raw = message.text.strip()
 
     if not re.search(r"[\wа-яА-ЯёЁ]", raw) or len(raw) < 2:
@@ -869,6 +1337,10 @@ async def handle_plan_codes(message: Message, state: FSMContext):
 
 @dp.message(SessionState.plan_disambiguation)
 async def handle_plan_disambiguation(message: Message, state: FSMContext):
+    # Проверяем команды
+    if await check_commands_in_state(message, state):
+        return
+    
     data = await state.get_data()
     candidates: List[Dict[str, Any]] = data.get("candidate_codes", [])
     if not candidates:
@@ -910,6 +1382,10 @@ async def plan_continue(message: Message, state: FSMContext):
 
 @dp.message(SessionState.plan_confirm)
 async def handle_plan_confirm(message: Message, state: FSMContext):
+    # Проверяем команды
+    if await check_commands_in_state(message, state):
+        return
+    
     raw = (message.text or "").strip().lower()
 
     if raw in CONFIRM_WORDS:
@@ -943,6 +1419,10 @@ async def feedback_back_to_menu(message: Message, state: FSMContext):
 
 @dp.message(SessionState.plan_feedback_rating)
 async def handle_feedback_rating(message: Message, state: FSMContext):
+    # Проверяем команды
+    if await check_commands_in_state(message, state):
+        return
+    
     text = (message.text or "").strip().lower()
     if text not in {"принято", "нужны правки"}:
         await message.answer("Пиши 'Принято' или 'Нужны правки'.", reply_markup=FEEDBACK_KEYBOARD)
@@ -960,6 +1440,10 @@ async def feedback_comment_back(message: Message, state: FSMContext):
 
 @dp.message(SessionState.plan_feedback_comment)
 async def handle_feedback_comment(message: Message, state: FSMContext):
+    # Проверяем команды
+    if await check_commands_in_state(message, state):
+        return
+    
     comment = message.text.strip()
     data = await state.get_data()
     plan_id = data.get("plan_id")
@@ -1004,6 +1488,9 @@ async def start_new_plan(message: Message, state: FSMContext):
 @dp.message(Command("profile"))
 @dp.message(F.text.casefold() == "обновить профиль")
 async def update_profile(message: Message, state: FSMContext):
+    # Полностью очищаем состояние FSM
+    await state.clear()
+    
     telegram_id = str(message.from_user.id)
     with get_db() as db:
         doctor = db.query(Doctor).filter_by(telegram_id=telegram_id).one_or_none()
@@ -1012,6 +1499,7 @@ async def update_profile(message: Message, state: FSMContext):
             doctor.experience_years = None
             doctor.preferences = {}
             db.commit()
+    
     await message.answer("Обновим профиль. Введи ФИО полностью.", reply_markup=MAIN_KEYBOARD)
     await state.set_state(SessionState.doctor_name)
 
@@ -1024,6 +1512,148 @@ async def show_help(message: Message):
 @dp.message(F.text.lower() == "назад")
 async def back_to_main(message: Message, state: FSMContext):
     await message.answer("Возвращаю основное меню.", reply_markup=MAIN_KEYBOARD)
+
+
+# Обработчик свободных текстовых сообщений с LLM для полноценного диалога
+@dp.message(F.text)
+async def handle_free_text(message: Message, state: FSMContext):
+    """
+    Обработчик для свободных текстовых сообщений, которые не попали в другие обработчики.
+    Использует LLM для понимания намерения и ведения диалога.
+    """
+    # Пропускаем команды - они обрабатываются отдельными обработчиками
+    text_lower = (message.text or "").strip().lower()
+    if text_lower.startswith("/") or text_lower in {"назад", "подсказки", "оценить план"}:
+        return
+    
+    # Проверяем команды через функцию
+    if await check_commands_in_state(message, state):
+        return
+    
+    # Получаем текущее состояние и данные
+    current_state_obj = await state.get_state()
+    current_state = current_state_obj.state if current_state_obj else None
+    state_data = await state.get_data()
+    
+    # Если LLM не доступен, используем простой fallback
+    if not LLM_CLIENT:
+        await message.answer(
+            "Не понял, что ты имеешь в виду. Используй команды из меню или введи данные для текущего шага.",
+            reply_markup=MAIN_KEYBOARD,
+        )
+        return
+    
+    # Показываем индикатор "печатает"
+    await bot.send_chat_action(message.chat.id, "typing")
+    
+    try:
+        # Формируем историю диалога (можно расширить для хранения полной истории)
+        conversation_history = []  # Пока используем только текущее сообщение
+        
+        # Используем LLM для понимания намерения
+        intent_result = await with_typing_action(
+            message.chat.id,
+            asyncio.wait_for(
+                LLM_CLIENT.understand_intent(
+                    user_message=message.text,
+                    current_state=current_state,
+                    state_data=state_data,
+                    conversation_history=conversation_history,
+                ),
+                timeout=config.yandex_gpt_timeout + 5,
+            ),
+        )
+        
+        if not intent_result:
+            await message.answer(
+                "Извини, не смог понять твоё сообщение. Попробуй сформулировать иначе или используй команды из меню.",
+                reply_markup=MAIN_KEYBOARD,
+            )
+            return
+        
+        intent = intent_result.get("intent", "unclear")
+        action = intent_result.get("action", "ask_clarification")
+        explanation = intent_result.get("explanation", "")
+        extracted_data = intent_result.get("extracted_data", {})
+        
+        # Выполняем действие в зависимости от намерения
+        if action == "redirect_to_profile":
+            await update_profile(message, state)
+            return
+        
+        if action == "redirect_to_intake":
+            # Проверяем, есть ли данные о пациенте
+            if not state_data.get("patient_id"):
+                await message.answer(
+                    "Сначала укажи пациента (ФИО/ID), а затем надиктуй план лечения.",
+                    reply_markup=MAIN_KEYBOARD,
+                )
+                await state.set_state(SessionState.patient)
+            else:
+                await message.answer(
+                    "🎙 Надиктуй план лечения (голос или текст).",
+                    reply_markup=MAIN_KEYBOARD,
+                )
+                await state.set_state(SessionState.intake)
+            return
+        
+        if action == "redirect_to_codes":
+            if not state_data.get("intake"):
+                await message.answer(
+                    "Сначала опиши план лечения, а затем укажи коды услуг.",
+                    reply_markup=MAIN_KEYBOARD,
+                )
+                await state.set_state(SessionState.intake)
+            else:
+                await message.answer(
+                    "Отправь коды услуг или опиши словами (например: 'имплантат Straumann').",
+                    reply_markup=MAIN_KEYBOARD,
+                )
+                await state.set_state(SessionState.plan_codes)
+            return
+        
+        if action == "continue_state":
+            # Продолжаем в текущем состоянии - сообщение уже обработано, просто подтверждаем
+            if explanation:
+                await message.answer(explanation, reply_markup=MAIN_KEYBOARD)
+            else:
+                await message.answer("Продолжаю...", reply_markup=MAIN_KEYBOARD)
+            return
+        
+        if action == "answer_question":
+            # Отвечаем на вопрос через LLM
+            if explanation:
+                await message.answer(explanation, reply_markup=MAIN_KEYBOARD)
+            else:
+                await message.answer(
+                    "Отвечаю на твой вопрос через LLM... (функционал в разработке)",
+                    reply_markup=MAIN_KEYBOARD,
+                )
+            return
+        
+        # Fallback: просим уточнить
+        if explanation:
+            response_text = f"Не совсем понял. {explanation}\n\nПопробуй использовать команды из меню или сформулируй запрос иначе."
+        else:
+            response_text = (
+                "Не понял, что ты имеешь в виду. "
+                "Используй команды из меню (/start, /profile, /newplan) или введи данные для текущего шага."
+            )
+        
+        await message.answer(response_text, reply_markup=MAIN_KEYBOARD)
+    
+    except asyncio.TimeoutError:
+        await message.answer(
+            "Извини, обработка запроса заняла слишком много времени. Попробуй сформулировать проще.",
+            reply_markup=MAIN_KEYBOARD,
+        )
+    except Exception as exc:
+        logging.exception(f"Failed to handle free text message: {exc}")
+        await message.answer(
+            "Произошла ошибка при обработке сообщения. Попробуй использовать команды из меню.",
+            reply_markup=MAIN_KEYBOARD,
+        )
+
 
 async def main():
     with suppress(KeyboardInterrupt, SystemExit):

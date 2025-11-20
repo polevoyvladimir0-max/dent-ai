@@ -120,6 +120,43 @@ class PlanFeedback(Base):
     plan = relationship("TreatmentPlan", back_populates="feedback")
     doctor = relationship("Doctor", back_populates="feedback")
 
+
+class PlanTemplate(Base):
+    """Шаблон плана лечения, обученный на предпочтениях врача.
+    
+    Связывает идеологический план (диктовка врача) с последовательностью кодов.
+    Используется для обучения модели на предпочтениях врача.
+    """
+    __tablename__ = "plan_templates"
+
+    id = Column(Integer, primary_key=True)
+    doctor_id = Column(Integer, ForeignKey("doctors.id"), nullable=False)
+    
+    # Идеологический план (диктовка врача)
+    ideological_plan = Column(Text, nullable=False)
+    
+    # Последовательность кодов (JSON массив строк)
+    codes_sequence = Column(JSON, nullable=False)
+    
+    # Метаданные плана (бренды, локализация, особенности)
+    # Пример: {"brands": ["Straumann"], "location": "зуб 2.5", "features": ["одномоментная"]}
+    plan_metadata = Column("metadata", JSON, default=dict)
+    
+    # ID точки в Qdrant для векторного поиска
+    qdrant_point_id = Column(Integer, unique=True, nullable=True)
+    
+    # Счётчик использования (для приоритизации в поиске)
+    usage_count = Column(Integer, default=1)
+    
+    # Связанный plan_id (если шаблон создан из конкретного плана)
+    source_plan_id = Column(Integer, ForeignKey("treatment_plans.id"), nullable=True)
+    
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    doctor = relationship("Doctor")
+    source_plan = relationship("TreatmentPlan")
+
 def init_db():
     Base.metadata.create_all(bind=engine)
     if engine.dialect.name == "sqlite":
@@ -138,3 +175,28 @@ def _apply_sqlite_migrations():
     ensure_column("doctors", "preferences", "preferences JSON")
     ensure_column("treatment_plans", "agent_plan", "agent_plan TEXT")
     ensure_column("treatment_plans", "agent_validation", "agent_validation JSON")
+    
+    # Создаём таблицу plan_templates, если её нет
+    inspector = inspect(engine)
+    if "plan_templates" not in inspector.get_table_names():
+        with engine.begin() as conn:
+            conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS plan_templates (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    doctor_id INTEGER NOT NULL REFERENCES doctors(id),
+                    ideological_plan TEXT NOT NULL,
+                    codes_sequence TEXT NOT NULL,
+                    metadata TEXT DEFAULT '{}',
+                    qdrant_point_id INTEGER UNIQUE,
+                    usage_count INTEGER DEFAULT 1,
+                    source_plan_id INTEGER REFERENCES treatment_plans(id),
+                    created_at TEXT DEFAULT (datetime('now')),
+                    updated_at TEXT DEFAULT (datetime('now'))
+                )
+            """))
+            # Создаём индексы для быстрого поиска
+            try:
+                conn.execute(text("CREATE INDEX IF NOT EXISTS idx_plan_templates_doctor ON plan_templates(doctor_id)"))
+                conn.execute(text("CREATE INDEX IF NOT EXISTS idx_plan_templates_qdrant ON plan_templates(qdrant_point_id)"))
+            except Exception:
+                pass  # Индексы могут уже существовать
