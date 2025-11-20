@@ -16,8 +16,32 @@ ENV_FILE="${ENV_FILE:-$PROJECT_DIR/.env}"
 if [ -f "$ENV_FILE" ]; then
   log "Loading environment from $ENV_FILE"
   set -a
-  # shellcheck disable=SC1090
-  source <(tr -d '\r' < "$ENV_FILE")
+  # Безопасная загрузка .env: парсим только KEY=VALUE строки, игнорируя комментарии и пустые строки
+  while IFS= read -r line || [ -n "$line" ]; do
+    # Убираем \r для Windows line endings
+    line=$(printf '%s' "$line" | tr -d '\r')
+    # Пропускаем комментарии и пустые строки
+    [[ "$line" =~ ^[[:space:]]*# ]] && continue
+    [[ -z "${line// }" ]] && continue
+    # Пропускаем строки без =
+    [[ ! "$line" =~ = ]] && continue
+    # Экспортируем переменную безопасно
+    # Извлекаем ключ и значение
+    key="${line%%=*}"
+    value="${line#*=}"
+    # Убираем пробелы вокруг ключа
+    key="${key%"${key##*[![:space:]]}"}"
+    key="${key#"${key%%[![:space:]]*}"}"
+    # Убираем кавычки вокруг значения, если они есть
+    if [[ "$value" =~ ^\".*\"$ ]] || [[ "$value" =~ ^\'.*\'$ ]]; then
+      value="${value:1:-1}"
+    fi
+    # Убираем пробелы вокруг значения
+    value="${value%"${value##*[![:space:]]}"}"
+    value="${value#"${value%%[![:space:]]*}"}"
+    # Экспортируем
+    export "$key=$value" 2>/dev/null || true
+  done < "$ENV_FILE"
   set +a
 fi
 
