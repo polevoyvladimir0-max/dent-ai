@@ -854,21 +854,30 @@ jobs:
 
             fi
 
+            echo "Logging into Docker registry..."
             printf '%s' "$LOGIN_PASS" | docker login "$REGISTRY" -u "$LOGIN_USER" --password-stdin
 
+            echo "Pulling base image..."
             BASE_IMAGE="${REGISTRY}/dent-ai/base:${IMAGE_TAG}"
+            timeout 600 docker pull "${BASE_IMAGE}" || timeout 600 docker pull "${REGISTRY}/dent-ai/base:latest" || echo "Warning: Failed to pull base image"
 
-            docker pull "${BASE_IMAGE}" || docker pull "${REGISTRY}/dent-ai/base:latest"
-
+            echo "Pulling application images..."
             export APP_IMAGE BOT_IMAGE BACKUP_IMAGE
+            timeout 900 docker compose pull app bot postgres-backup || { echo "Error: Failed to pull images" >&2; exit 1; }
 
-            docker compose pull app bot postgres-backup
-
+            echo "Starting containers..."
             docker compose up -d --remove-orphans
+
+            echo "Waiting for containers to start..."
+            sleep 5
 
             # Удаляем остановленные контейнеры перед unseal
             docker compose ps --filter "status=exited" -q | xargs -r docker rm -f || true
 
+            echo "Checking container status..."
+            docker compose ps
+
+            echo "Running vault auto-unseal..."
             sudo env "PROJECT_DIR=$DEPLOY_PATH" "ENV_FILE=$DEPLOY_PATH/.env" bash ./infra/scripts/vault-auto-unseal.sh
 
             HEALTH_URL="http://127.0.0.1:8000/ping"
@@ -924,15 +933,22 @@ jobs:
             # Удаляем неиспользуемые образы старше 7 дней
             docker image prune -af --filter "until=168h" || true
             # Удаляем старые версии образов dent-ai/* (оставляем последние 5 SHA)
+            echo "Cleaning up old image versions..."
             for image_name in app bot base backup; do
+              echo "Checking ${image_name} images..."
               # Получаем все образы с тегом SHA (не latest) и сортируем по дате
               # Удаляем все кроме последних 5
-              docker images "${REGISTRY}/dent-ai/${image_name}" --format "{{.ID}} {{.CreatedAt}}" --filter "dangling=false" | \
+              old_images=$(docker images "${REGISTRY}/dent-ai/${image_name}" --format "{{.ID}} {{.CreatedAt}}" --filter "dangling=false" | \
                 grep -v "latest" | \
                 sort -k2 -r | \
                 tail -n +6 | \
-                awk '{print $1}' | \
-                xargs -r docker rmi -f || true
+                awk '{print $1}' || true)
+              if [ -n "$old_images" ]; then
+                echo "Removing old ${image_name} images..."
+                echo "$old_images" | xargs -r timeout 300 docker rmi -f || true
+              else
+                echo "No old ${image_name} images to remove"
+              fi
             done
             # Удаляем неиспользуемые volumes старше 7 дней
             docker volume prune -f --filter "until=168h" || true
