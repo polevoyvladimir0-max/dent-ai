@@ -887,6 +887,9 @@ jobs:
 
             # Сразу удаляем образы с <none> тегами (они создаются при пересоздании контейнеров)
             echo "Removing dangling images with <none> tags..."
+            # Получаем ID всех образов, используемых в работающих контейнерах
+            used_image_ids=$(docker ps --format "{{.ID}}" | xargs -I {} docker inspect -f '{{.Image}}' {} 2>/dev/null | sort -u || true)
+            
             for image_name in app bot base backup; do
               # Получаем ID образов с <none> тегами
               none_images=$(docker images "${REGISTRY}/dent-ai/${image_name}" --format "{{.ID}}\t{{.Tag}}" --filter "dangling=false" | \
@@ -894,9 +897,15 @@ jobs:
               if [ -n "$none_images" ]; then
                 for img_id in $none_images; do
                   # Проверяем, что образ не используется в работающих контейнерах
-                  if ! docker ps --format "{{.Image}}" | grep -q "$img_id"; then
+                  img_full_id=$(docker inspect -f '{{.Id}}' "$img_id" 2>/dev/null || echo "")
+                  if [ -z "$img_full_id" ]; then
+                    continue
+                  fi
+                  if ! echo "$used_image_ids" | grep -q "^sha256:$img_full_id" && ! echo "$used_image_ids" | grep -q "$img_id"; then
                     echo "  Removing <none> image $img_id for ${image_name}"
                     docker rmi -f "$img_id" 2>/dev/null || true
+                  else
+                    echo "  Skipping <none> image $img_id for ${image_name} (in use)"
                   fi
                 done
               fi
