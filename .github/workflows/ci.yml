@@ -947,10 +947,9 @@ jobs:
             echo "Cleaning up old image versions..."
             for image_name in app bot base backup; do
               echo "Checking ${image_name} images..."
-              # Получаем ID всех образов, отсортированных по дате создания
-              # Используем docker images с сортировкой по дате
-              all_images=$(docker images "${REGISTRY}/dent-ai/${image_name}" --format "{{.Repository}}:{{.Tag}}\t{{.ID}}\t{{.CreatedAt}}" --filter "dangling=false" | \
-                grep -v "latest" | \
+              # Получаем все образы (включая <none> теги), отсортированные по дате создания
+              # Используем формат: ID,Tag,CreatedAt для более надёжной сортировки
+              all_images=$(docker images "${REGISTRY}/dent-ai/${image_name}" --format "{{.ID}}\t{{.Tag}}\t{{.CreatedAt}}" --filter "dangling=false" | \
                 sort -k3 -r || true)
               if [ -z "$all_images" ]; then
                 echo "No ${image_name} images found"
@@ -959,19 +958,42 @@ jobs:
               # Подсчитываем количество образов
               image_count=$(echo "$all_images" | wc -l)
               echo "Found $image_count ${image_name} image(s)"
-              if [ "$image_count" -le 5 ]; then
-                echo "Keeping all ${image_name} images (<=5)"
-                continue
-              fi
-              # Получаем старые образы (пропускаем первые 5)
-              old_images=$(echo "$all_images" | tail -n +6 | awk '{print $1}' || true)
-              if [ -n "$old_images" ]; then
-                old_count=$(echo "$old_images" | wc -l)
-                echo "Removing $old_count old ${image_name} image(s)..."
-                for img in $old_images; do
-                  echo "  Removing $img"
-                  docker rmi -f "$img" 2>/dev/null || true
+              
+              # Получаем ID образов, которые используются в контейнерах
+              used_images=$(docker ps --format "{{.Image}}" | grep "${REGISTRY}/dent-ai/${image_name}" | sed 's/@sha256:.*//' | sort -u || true)
+              used_ids=$(docker inspect -f '{{.Image}}' $(docker ps -q) 2>/dev/null | sort -u || true)
+              
+              # Удаляем образы с тегом <none> (они уже не используются с тегами)
+              echo "Removing images with <none> tags..."
+              docker images "${REGISTRY}/dent-ai/${image_name}" --format "{{.ID}}\t{{.Tag}}" --filter "dangling=false" | \
+                awk -F'\t' '$2 == "<none>" {print $1}' | \
+                while read -r img_id; do
+                  # Проверяем, используется ли этот образ
+                  if ! echo "$used_ids" | grep -q "$img_id"; then
+                    echo "  Removing <none> image $img_id"
+                    docker rmi -f "$img_id" 2>/dev/null || true
+                  fi
                 done
+              
+              # Удаляем старые версии с тегами (оставляем последние 5)
+              if [ "$image_count" -gt 5 ]; then
+                # Получаем образы с тегами (не <none> и не latest), отсортированные по дате
+                tagged_images=$(echo "$all_images" | awk -F'\t' '$2 != "<none>" && $2 != "latest" {print $1 "\t" $2 "\t" $3}' | sort -k3 -r || true)
+                if [ -n "$tagged_images" ]; then
+                  tagged_count=$(echo "$tagged_images" | wc -l)
+                  if [ "$tagged_count" -gt 5 ]; then
+                    old_tagged=$(echo "$tagged_images" | tail -n +6 | awk '{print $1}' || true)
+                    if [ -n "$old_tagged" ]; then
+                      echo "Removing $(echo "$old_tagged" | wc -l) old tagged ${image_name} image(s)..."
+                      for img_id in $old_tagged; do
+                        if ! echo "$used_ids" | grep -q "$img_id"; then
+                          echo "  Removing old tagged image $img_id"
+                          docker rmi -f "$img_id" 2>/dev/null || true
+                        fi
+                      done
+                    fi
+                  fi
+                fi
               fi
             done
             # Удаляем неиспользуемые volumes старше 7 дней
