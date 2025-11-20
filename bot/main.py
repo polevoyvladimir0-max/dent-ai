@@ -287,10 +287,23 @@ async def suggest_codes_from_text(text_query: str) -> List[Dict[str, Any]]:
     loop = asyncio.get_running_loop()
 
     def _search():
-        return search_by_query(text_query, top_k=7)
+        # Улучшаем поиск: используем более строгий порог для коротких запросов
+        # Для запросов типа "синус" нужен более высокий порог, чтобы не находить случайные совпадения
+        query_len = len(text_query.strip())
+        if query_len < 5:
+            # Для очень коротких запросов повышаем порог
+            threshold = 0.5
+        elif query_len < 10:
+            # Для коротких запросов средний порог
+            threshold = 0.4
+        else:
+            # Для длинных запросов стандартный порог
+            threshold = 0.35
+        
+        return search_by_query(text_query, top_k=10, score_threshold=threshold)  # Увеличиваем top_k для лучшего выбора
 
     try:
-        results = await asyncio.wait_for(loop.run_in_executor(None, _search), timeout=SEMANTIC_TIMEOUT_SECONDS)
+        results = await asyncio.wait_for(loop.run_in_executor(None, _search), timeout=5.0)  # Уменьшаем таймаут до 5 секунд
     except asyncio.TimeoutError as timeout_err:
         logging.error("Semantic search timed out for query '%s'", text_query)
         raise SemanticSearchUnavailable("semantic timeout") from timeout_err
@@ -305,6 +318,27 @@ async def suggest_codes_from_text(text_query: str) -> List[Dict[str, Any]]:
         code = str(payload.get("code", "")).strip()
         if not code or code in seen_codes:
             continue
+        # Фильтруем по минимальному score (уже применён в search_by_query, но дополнительно проверяем)
+        query_len = len(text_query.strip())
+        min_score = 0.5 if query_len < 5 else (0.4 if query_len < 10 else 0.35)
+        if point.score < min_score:
+            continue
+        
+        # Дополнительная фильтрация: проверяем, что название услуги содержит ключевые слова запроса
+        display_name_lower = (payload.get("display_name", "") or "").lower()
+        query_lower = text_query.lower()
+        query_words = query_lower.split()
+        
+        # Если запрос содержит медицинские термины, проверяем их наличие в названии
+        medical_keywords = ["синус", "имплант", "коронка", "удаление", "лечение", "анестезия", "лифтинг"]
+        has_medical_keyword = any(kw in query_lower for kw in medical_keywords)
+        
+        if has_medical_keyword:
+            # Для медицинских терминов требуем более строгое совпадение
+            keyword_found = any(kw in display_name_lower for kw in medical_keywords if kw in query_lower)
+            if not keyword_found and point.score < 0.5:
+                continue  # Пропускаем, если нет совпадения ключевых слов и низкий score
+        
         seen_codes.add(code)
         suggestions.append(
             {
@@ -315,7 +349,9 @@ async def suggest_codes_from_text(text_query: str) -> List[Dict[str, Any]]:
                 "score": point.score,
             }
         )
-    return suggestions
+    # Сортируем по score (от большего к меньшему) для лучшей релевантности
+    suggestions.sort(key=lambda x: x.get("score", 0), reverse=True)
+    return suggestions[:7]  # Возвращаем максимум 7 лучших результатов
 
 
 def load_items_cached() -> Dict[str, Dict[str, Any]]:
@@ -1127,16 +1163,31 @@ async def handle_intake(message: Message, state: FSMContext):
     data = await state.get_data()
     doctor_id = data.get("doctor_id")
     
-    # Ищем похожие шаблоны планов в истории врача
+    # Ищем похожие шаблоны планов в истории врача (с таймаутом и обработкой ошибок)
     similar_templates = []
     if doctor_id and ideological_plan:
-        await message.answer("🔍 Ищу похожие планы в истории...")
-        similar_templates = await search_similar_plan_templates(
-            ideological_plan=ideological_plan,
-            doctor_id=doctor_id,
-            top_k=3,
-            score_threshold=0.7,
-        )
+        try:
+            await message.answer("🔍 Ищу похожие планы в истории...")
+            # Добавляем явный таймаут для поиска (уменьшаем до 3 секунд для быстрого ответа)
+            search_task = search_similar_plan_templates(
+                ideological_plan=ideological_plan,
+                doctor_id=doctor_id,
+                top_k=3,
+                score_threshold=0.7,
+            )
+            similar_templates = await asyncio.wait_for(search_task, timeout=3.0)
+            
+            # Если поиск вернул пустой список, просто продолжаем без предложения шаблонов
+            if not similar_templates:
+                logging.debug(f"No similar templates found for doctor {doctor_id}")
+        except asyncio.TimeoutError:
+            logging.warning(f"Template search timed out for doctor {doctor_id} after 3 seconds")
+            # Не показываем ошибку пользователю, просто продолжаем без предложения шаблонов
+            similar_templates = []
+        except Exception as exc:
+            logging.exception(f"Template search failed for doctor {doctor_id}: {exc}")
+            # Не показываем ошибку пользователю, просто продолжаем без предложения шаблонов
+            similar_templates = []
     
     # Если найдены похожие шаблоны - предлагаем врачу выбрать
     if similar_templates:
@@ -1295,8 +1346,59 @@ async def handle_plan_codes(message: Message, state: FSMContext):
         return
     
     raw = message.text.strip()
+    
+    # Если сообщение похоже на вопрос или не похоже на код/описание услуги - используем LLM
+    if LLM_CLIENT and (raw.endswith("?") or len(raw.split()) > 5 or raw.lower() in {"найди в базе", "найти", "поиск"}):
+        try:
+            await message.answer("🤔 Пытаюсь понять, что ты имеешь в виду...")
+            current_state_obj = await state.get_state()
+            current_state = current_state_obj.state if current_state_obj else None
+            state_data = await state.get_data()
+            intent_result = await asyncio.wait_for(
+                LLM_CLIENT.understand_intent(
+                    user_message=raw,
+                    current_state=current_state,
+                    state_data=state_data,
+                    conversation_history=[],
+                ),
+                timeout=5.0,
+            )
+            if intent_result:
+                action = intent_result.get("action", "")
+                explanation = intent_result.get("explanation", "")
+                if action == "answer_question" and explanation:
+                    await message.answer(explanation, reply_markup=MAIN_KEYBOARD)
+                    return
+                elif action == "redirect_to_codes" and explanation:
+                    await message.answer(f"{explanation}\n\nОтправь коды услуг или опиши словами.", reply_markup=MAIN_KEYBOARD)
+                    return
+        except Exception as llm_exc:
+            logging.debug(f"LLM fallback in plan_codes failed: {llm_exc}")
 
     if not re.search(r"[\wа-яА-ЯёЁ]", raw) or len(raw) < 2:
+        # Если LLM доступен, пытаемся понять намерение
+        if LLM_CLIENT:
+            try:
+                current_state_obj = await state.get_state()
+                current_state = current_state_obj.state if current_state_obj else None
+                state_data = await state.get_data()
+                intent_result = await asyncio.wait_for(
+                    LLM_CLIENT.understand_intent(
+                        user_message=raw,
+                        current_state=current_state,
+                        state_data=state_data,
+                        conversation_history=[],
+                    ),
+                    timeout=5.0,
+                )
+                if intent_result and intent_result.get("action") == "answer_question":
+                    explanation = intent_result.get("explanation", "")
+                    if explanation:
+                        await message.answer(explanation, reply_markup=MAIN_KEYBOARD)
+                        return
+            except Exception as llm_exc:
+                logging.debug(f"LLM fallback failed: {llm_exc}")
+        
         await message.answer(
             "Нужна более конкретная формулировка. Опиши услугу словами (например: 'имплантат Straumann').",
             reply_markup=MAIN_KEYBOARD,
@@ -1309,12 +1411,64 @@ async def handle_plan_codes(message: Message, state: FSMContext):
         try:
             picks = await suggest_codes_from_text(raw)
         except SemanticSearchUnavailable:
+            # Если семантический поиск недоступен, пробуем LLM для понимания намерения
+            if LLM_CLIENT:
+                try:
+                    await message.answer("🤔 Пытаюсь понять, что ты имеешь в виду...")
+                    current_state_obj = await state.get_state()
+                    current_state = current_state_obj.state if current_state_obj else None
+                    state_data = await state.get_data()
+                    intent_result = await asyncio.wait_for(
+                        LLM_CLIENT.understand_intent(
+                            user_message=raw,
+                            current_state=current_state,
+                            state_data=state_data,
+                            conversation_history=[],
+                        ),
+                        timeout=5.0,
+                    )
+                    if intent_result and intent_result.get("action") == "answer_question":
+                        explanation = intent_result.get("explanation", "")
+                        if explanation:
+                            await message.answer(explanation, reply_markup=MAIN_KEYBOARD)
+                            return
+                except Exception as llm_exc:
+                    logging.debug(f"LLM fallback failed: {llm_exc}")
+            
             await message.answer(
                 "⚠️ Не получилось подобрать услуги по описанию. Попробуй сформулировать иначе или введи коды вручную.",
                 reply_markup=MAIN_KEYBOARD,
             )
             return
         if not picks:
+            # Если результаты найдены, но пустые - возможно, запрос слишком общий
+            # Пробуем LLM для понимания намерения
+            if LLM_CLIENT and len(raw) > 3:  # Только для достаточно длинных запросов
+                try:
+                    await message.answer("🤔 Уточняю запрос...")
+                    current_state_obj = await state.get_state()
+                    current_state = current_state_obj.state if current_state_obj else None
+                    state_data = await state.get_data()
+                    intent_result = await asyncio.wait_for(
+                        LLM_CLIENT.understand_intent(
+                            user_message=raw,
+                            current_state=current_state,
+                            state_data=state_data,
+                            conversation_history=[],
+                        ),
+                        timeout=5.0,
+                    )
+                    if intent_result:
+                        explanation = intent_result.get("explanation", "")
+                        if explanation:
+                            await message.answer(
+                                f"{explanation}\n\nПопробуй уточнить формулировку или указать код.",
+                                reply_markup=MAIN_KEYBOARD,
+                            )
+                            return
+                except Exception as llm_exc:
+                    logging.debug(f"LLM clarification failed: {llm_exc}")
+            
             await message.answer("Не смог найти совпадения. Попробуй уточнить формулировку или указать код.")
             return
         await state.update_data(candidate_codes=picks, raw_text=raw)
@@ -1515,11 +1669,15 @@ async def back_to_main(message: Message, state: FSMContext):
 
 
 # Обработчик свободных текстовых сообщений с LLM для полноценного диалога
+# ВАЖНО: Этот обработчик должен быть последним, чтобы не перехватывать сообщения из состояний FSM
+# В aiogram обработчики выполняются в порядке регистрации, поэтому более специфичные (@dp.message(SessionState.X)) обрабатываются первыми
 @dp.message(F.text)
 async def handle_free_text(message: Message, state: FSMContext):
     """
     Обработчик для свободных текстовых сообщений, которые не попали в другие обработчики.
     Использует LLM для понимания намерения и ведения диалога.
+    
+    ВАЖНО: Этот обработчик срабатывает ТОЛЬКО если сообщение не было обработано обработчиками состояний FSM.
     """
     # Пропускаем команды - они обрабатываются отдельными обработчиками
     text_lower = (message.text or "").strip().lower()
@@ -1529,6 +1687,13 @@ async def handle_free_text(message: Message, state: FSMContext):
     # Проверяем команды через функцию
     if await check_commands_in_state(message, state):
         return
+    
+    # Проверяем, что мы не в состоянии FSM (если в состоянии - сообщение уже обработано специфичным обработчиком)
+    current_state_obj = await state.get_state()
+    if current_state_obj and current_state_obj.state:
+        # Если мы в состоянии FSM, но сюда попали - значит специфичный обработчик не обработал сообщение
+        # В этом случае используем LLM для понимания намерения
+        pass  # Продолжаем обработку через LLM
     
     # Получаем текущее состояние и данные
     current_state_obj = await state.get_state()
@@ -1625,10 +1790,30 @@ async def handle_free_text(message: Message, state: FSMContext):
             if explanation:
                 await message.answer(explanation, reply_markup=MAIN_KEYBOARD)
             else:
-                await message.answer(
-                    "Отвечаю на твой вопрос через LLM... (функционал в разработке)",
-                    reply_markup=MAIN_KEYBOARD,
-                )
+                # Если explanation пустое, генерируем ответ через LLM
+                try:
+                    system_prompt = (
+                        "Ты ассистент стоматолога. Отвечай на вопросы врача кратко и профессионально. "
+                        "Используй только проверенную медицинскую информацию."
+                    )
+                    user_prompt = f"Вопрос врача: {message.text}"
+                    llm_response = await asyncio.wait_for(
+                        LLM_CLIENT.smalltalk(system_prompt, user_prompt),
+                        timeout=config.yandex_gpt_timeout,
+                    )
+                    if llm_response:
+                        await message.answer(llm_response, reply_markup=MAIN_KEYBOARD)
+                    else:
+                        await message.answer(
+                            "Извини, не смог сгенерировать ответ. Попробуй сформулировать вопрос иначе.",
+                            reply_markup=MAIN_KEYBOARD,
+                        )
+                except Exception as llm_exc:
+                    logging.exception(f"LLM question answering failed: {llm_exc}")
+                    await message.answer(
+                        "Не смог обработать вопрос. Попробуй сформулировать иначе или используй команды из меню.",
+                        reply_markup=MAIN_KEYBOARD,
+                    )
             return
         
         # Fallback: просим уточнить

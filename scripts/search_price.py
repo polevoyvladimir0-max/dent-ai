@@ -74,7 +74,18 @@ def search_by_code(code: str) -> pd.DataFrame:
     return match
 
 
-def search_by_query(query: str, top_k: int = DEFAULT_TOP_K) -> List[models.ScoredPoint]:
+def search_by_query(query: str, top_k: int = DEFAULT_TOP_K, score_threshold: float = 0.3) -> List[models.ScoredPoint]:
+    """
+    Семантический поиск по прайсу с минимальным порогом схожести.
+    
+    Args:
+        query: Текстовый запрос
+        top_k: Количество результатов
+        score_threshold: Минимальный порог схожести (0-1), по умолчанию 0.3 для более строгой фильтрации
+    
+    Returns:
+        Список результатов с оценками схожести
+    """
     model = load_model()
     vector = model.encode(query)
 
@@ -85,10 +96,12 @@ def search_by_query(query: str, top_k: int = DEFAULT_TOP_K) -> List[models.Score
         host = os.getenv("QDRANT_HOST", "127.0.0.1")
         port = int(os.getenv("QDRANT_PORT", "6333"))
         client = QdrantClient(host=host, port=port)
+    
     results = client.search(
         collection_name=COLLECTION,
         query_vector=vector,
         limit=top_k,
+        score_threshold=score_threshold,  # Добавляем минимальный порог схожести
     )
     return results
 
