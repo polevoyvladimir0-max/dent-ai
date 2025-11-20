@@ -859,11 +859,19 @@ jobs:
 
             echo "Pulling base image..."
             BASE_IMAGE="${REGISTRY}/dent-ai/base:${IMAGE_TAG}"
-            timeout 600 docker pull "${BASE_IMAGE}" || timeout 600 docker pull "${REGISTRY}/dent-ai/base:latest" || echo "Warning: Failed to pull base image"
+            if command -v timeout >/dev/null 2>&1; then
+              timeout 600 docker pull "${BASE_IMAGE}" || timeout 600 docker pull "${REGISTRY}/dent-ai/base:latest" || echo "Warning: Failed to pull base image"
+            else
+              docker pull "${BASE_IMAGE}" || docker pull "${REGISTRY}/dent-ai/base:latest" || echo "Warning: Failed to pull base image"
+            fi
 
             echo "Pulling application images..."
             export APP_IMAGE BOT_IMAGE BACKUP_IMAGE
-            timeout 900 docker compose pull app bot postgres-backup || { echo "Error: Failed to pull images" >&2; exit 1; }
+            if command -v timeout >/dev/null 2>&1; then
+              timeout 900 docker compose pull app bot postgres-backup || { echo "Error: Failed to pull images" >&2; exit 1; }
+            else
+              docker compose pull app bot postgres-backup || { echo "Error: Failed to pull images" >&2; exit 1; }
+            fi
 
             echo "Starting containers..."
             docker compose up -d --remove-orphans
@@ -872,7 +880,10 @@ jobs:
             sleep 5
 
             # Удаляем остановленные контейнеры перед unseal
-            docker compose ps --filter "status=exited" -q | xargs -r docker rm -f || true
+            stopped=$(docker compose ps --filter "status=exited" -q || true)
+            if [ -n "$stopped" ]; then
+              echo "$stopped" | xargs docker rm -f || true
+            fi
 
             echo "Checking container status..."
             docker compose ps
@@ -945,7 +956,11 @@ jobs:
                 awk '{print $1}' || true)
               if [ -n "$old_images" ]; then
                 echo "Removing old ${image_name} images..."
-                echo "$old_images" | xargs -r timeout 300 docker rmi -f || true
+                if command -v timeout >/dev/null 2>&1; then
+                  echo "$old_images" | xargs -r sh -c 'timeout 300 docker rmi -f "$@" || true' _ || true
+                else
+                  echo "$old_images" | xargs -r docker rmi -f || true
+                fi
               else
                 echo "No old ${image_name} images to remove"
               fi
