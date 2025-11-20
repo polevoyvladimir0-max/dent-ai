@@ -885,6 +885,23 @@ jobs:
               echo "$stopped" | xargs docker rm -f || true
             fi
 
+            # Сразу удаляем образы с <none> тегами (они создаются при пересоздании контейнеров)
+            echo "Removing dangling images with <none> tags..."
+            for image_name in app bot base backup; do
+              # Получаем ID образов с <none> тегами
+              none_images=$(docker images "${REGISTRY}/dent-ai/${image_name}" --format "{{.ID}}\t{{.Tag}}" --filter "dangling=false" | \
+                awk -F'\t' '$2 == "<none>" {print $1}' || true)
+              if [ -n "$none_images" ]; then
+                for img_id in $none_images; do
+                  # Проверяем, что образ не используется в работающих контейнерах
+                  if ! docker ps --format "{{.Image}}" | grep -q "$img_id"; then
+                    echo "  Removing <none> image $img_id for ${image_name}"
+                    docker rmi -f "$img_id" 2>/dev/null || true
+                  fi
+                done
+              fi
+            done
+
             echo "Checking container status..."
             docker compose ps
 
@@ -959,21 +976,28 @@ jobs:
               image_count=$(echo "$all_images" | wc -l)
               echo "Found $image_count ${image_name} image(s)"
               
-              # Получаем ID образов, которые используются в контейнерах
-              used_images=$(docker ps --format "{{.Image}}" | grep "${REGISTRY}/dent-ai/${image_name}" | sed 's/@sha256:.*//' | sort -u || true)
-              used_ids=$(docker inspect -f '{{.Image}}' $(docker ps -q) 2>/dev/null | sort -u || true)
+              # Получаем ID образов, которые используются в работающих контейнерах
+              used_ids=$(docker ps --format "{{.Image}}" | xargs -I {} docker inspect -f '{{.Id}}' {} 2>/dev/null | sort -u || true)
               
-              # Удаляем образы с тегом <none> (они уже не используются с тегами)
+              # Удаляем образы с тегом <none> (они создаются при пересоздании контейнеров)
               echo "Removing images with <none> tags..."
-              docker images "${REGISTRY}/dent-ai/${image_name}" --format "{{.ID}}\t{{.Tag}}" --filter "dangling=false" | \
-                awk -F'\t' '$2 == "<none>" {print $1}' | \
-                while read -r img_id; do
-                  # Проверяем, используется ли этот образ
-                  if ! echo "$used_ids" | grep -q "$img_id"; then
-                    echo "  Removing <none> image $img_id"
+              none_images=$(docker images "${REGISTRY}/dent-ai/${image_name}" --format "{{.ID}}\t{{.Tag}}" --filter "dangling=false" | \
+                awk -F'\t' '$2 == "<none>" {print $1}' || true)
+              if [ -n "$none_images" ]; then
+                for img_id in $none_images; do
+                  # Проверяем, используется ли этот образ в работающих контейнерах
+                  img_inspect=$(docker inspect -f '{{.Id}}' "$img_id" 2>/dev/null || true)
+                  if [ -z "$img_inspect" ]; then
+                    continue
+                  fi
+                  if ! echo "$used_ids" | grep -q "$img_inspect"; then
+                    echo "  Removing <none> image $img_id for ${image_name}"
                     docker rmi -f "$img_id" 2>/dev/null || true
+                  else
+                    echo "  Skipping <none> image $img_id for ${image_name} (in use)"
                   fi
                 done
+              fi
               
               # Удаляем старые версии с тегами (оставляем последние 5)
               if [ "$image_count" -gt 5 ]; then
@@ -996,8 +1020,8 @@ jobs:
                 fi
               fi
             done
-            # Удаляем неиспользуемые volumes старше 7 дней
-            docker volume prune -f --filter "until=168h" || true
+            # Удаляем неиспользуемые volumes (docker volume prune не поддерживает фильтр until)
+            docker volume prune -f || true
             # Удаляем build cache старше 24 часов
             docker builder prune -af --filter "until=24h" || true
             # Показываем использование диска
