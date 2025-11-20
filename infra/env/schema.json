@@ -380,10 +380,10 @@
       "pattern": "^[a-z0-9.-]+/.+"
     },
     "REGISTRY_USER": {
-      "description": "Имя пользователя/сервисного аккаунта для логина в реестр",
+      "description": "Имя пользователя/сервисного аккаунта для логина в реестр (iam, oauth, json_key)",
       "required": true,
       "scopes": ["ci"],
-      "pattern": "^[A-Za-z0-9_.-]+$"
+      "pattern": "^(iam|oauth|json_key)$"
     },
     "REGISTRY_PASSWORD": {
       "description": "Пароль/JSON ключ от реестра",
