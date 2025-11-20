@@ -379,13 +379,67 @@ async def suggest_codes_from_text_single(text_query: str, loop: Optional[asyncio
         
         return search_by_query(text_query, top_k=15, score_threshold=threshold)  # Увеличиваем top_k для общих терминов
 
+    def _text_search_fallback() -> List[Dict[str, Any]]:
+        """Fallback поиск по тексту в кеше, если Qdrant недоступен."""
+        try:
+            items_cache = load_items_cached()
+            query_lower = text_query.strip().lower()
+            query_words = [w for w in query_lower.split() if len(w) > 2]
+            
+            if not query_words:
+                return []
+            
+            suggestions: List[Dict[str, Any]] = []
+            seen_codes = set()
+            
+            # Простой текстовый поиск по названию и разделу
+            for code, item in items_cache.items():
+                display_name_lower = (item.get("display_name", "") or "").lower()
+                section_lower = (item.get("section", "") or "").lower()
+                combined_text = f"{display_name_lower} {section_lower}"
+                
+                # Проверяем наличие ключевых слов из запроса
+                matches = sum(1 for word in query_words if word in combined_text)
+                if matches > 0:
+                    # Простой score на основе количества совпадений
+                    score = matches / len(query_words)
+                    if code not in seen_codes:
+                        seen_codes.add(code)
+                        suggestions.append({
+                            "code": code,
+                            "display_name": item.get("display_name", ""),
+                            "base_price": item.get("base_price", 0),
+                            "section": item.get("section", ""),
+                            "score": score,
+                        })
+            
+            # Сортируем по score
+            suggestions.sort(key=lambda x: x.get("score", 0), reverse=True)
+            return suggestions[:7]
+        except Exception as fallback_exc:
+            logging.warning(f"Text search fallback failed: {fallback_exc}")
+            return []
+
     try:
         results = await asyncio.wait_for(loop.run_in_executor(None, _search), timeout=5.0)
     except asyncio.TimeoutError as timeout_err:
-        logging.error("Semantic search timed out for query '%s'", text_query)
+        logging.error("Semantic search timed out for query '%s', trying text search fallback", text_query)
+        # Пробуем fallback через текстовый поиск
+        fallback_results = await loop.run_in_executor(None, _text_search_fallback)
+        if fallback_results:
+            logging.info(f"Text search fallback found {len(fallback_results)} results for query '{text_query}'")
+            return fallback_results
         raise SemanticSearchUnavailable("semantic timeout") from timeout_err
     except Exception as exc:
-        logging.exception("Semantic search failed for query: %s", text_query)
+        logging.warning("Semantic search failed for query '%s': %s, trying text search fallback", text_query, exc)
+        # Пробуем fallback через текстовый поиск
+        try:
+            fallback_results = await loop.run_in_executor(None, _text_search_fallback)
+            if fallback_results:
+                logging.info(f"Text search fallback found {len(fallback_results)} results for query '{text_query}'")
+                return fallback_results
+        except Exception as fallback_exc:
+            logging.error(f"Text search fallback also failed: {fallback_exc}")
         raise SemanticSearchUnavailable("semantic failure") from exc
 
     seen_codes = set()
