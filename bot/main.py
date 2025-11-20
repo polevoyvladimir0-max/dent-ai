@@ -217,7 +217,7 @@ async def search_similar_plan_templates(
     ideological_plan: str,
     doctor_id: int,
     top_k: int = 3,
-    score_threshold: float = 0.7,
+    score_threshold: float = 0.5,  # Снижаем дефолтный порог с 0.7 до 0.5 для более широкого поиска
 ) -> List[Dict[str, Any]]:
     """
     Ищет похожие шаблоны планов в истории врача по идеологическому запросу.
@@ -242,7 +242,7 @@ async def search_similar_plan_templates(
         try:
             results = await asyncio.wait_for(
                 loop.run_in_executor(None, _search),
-                timeout=6.0,  # Timeout для поиска шаблонов
+                timeout=5.0,  # Увеличиваем таймаут до 5 секунд (синхронизируем с вызовами)
             )
         except asyncio.TimeoutError:
             logging.warning(f"Template search timed out for doctor {doctor_id}")
@@ -273,6 +273,12 @@ async def search_similar_plan_templates(
 
 
 async def suggest_codes_from_text(text_query: str) -> List[Dict[str, Any]]:
+    """
+    Поиск услуг по текстовому описанию.
+    
+    Для длинных описаний (более 50 символов) пытается разбить текст на отдельные услуги
+    и ищет каждую услугу отдельно, объединяя результаты.
+    """
     alias_codes = match_aliases(text_query)
     results: List[Dict[str, Any]] = []
     if alias_codes:
@@ -285,7 +291,58 @@ async def suggest_codes_from_text(text_query: str) -> List[Dict[str, Any]]:
         return results
 
     loop = asyncio.get_running_loop()
+    query_lower = text_query.strip().lower()
+    query_len = len(text_query.strip())
+    
+    # Для длинных описаний (>50 символов) пытаемся разбить на отдельные услуги
+    # Разделители: запятая, точка, точка с запятой, "и", "с", "затем"
+    if query_len > 50:
+        # Пытаемся разбить на части по разделителям
+        separators = [r',', r'\.', r';', r'\s+и\s+', r'\s+с\s+', r'\s+затем\s+', r'\s+потом\s+']
+        parts = [text_query.strip()]
+        for sep in separators:
+            new_parts = []
+            for part in parts:
+                split_parts = re.split(sep, part, flags=re.IGNORECASE)
+                new_parts.extend([p.strip() for p in split_parts if p.strip() and len(p.strip()) > 3])
+            if len(new_parts) > len(parts):
+                parts = new_parts
+        
+        # Если разбили на несколько частей, ищем каждую отдельно
+        if len(parts) > 1:
+            logging.info(f"Split long query into {len(parts)} parts: {parts[:3]}...")
+            all_suggestions: List[Dict[str, Any]] = []
+            seen_codes = set()
+            
+            # Ищем каждую часть отдельно
+            for part in parts:
+                if len(part.strip()) < 3:
+                    continue
+                try:
+                    part_result = await suggest_codes_from_text_single(part.strip(), loop)
+                    if part_result:
+                        for suggestion in part_result:
+                            code = suggestion.get("code")
+                            if code and code not in seen_codes:
+                                seen_codes.add(code)
+                                all_suggestions.append(suggestion)
+                except Exception as part_exc:
+                    logging.debug(f"Failed to search for part '{part}': {part_exc}")
+                    continue
+            
+            # Сортируем по score и возвращаем лучшие результаты
+            all_suggestions.sort(key=lambda x: x.get("score", 0), reverse=True)
+            return all_suggestions[:10]  # Возвращаем до 10 результатов для длинных описаний
+    
+    # Для коротких запросов используем обычный поиск
+    return await suggest_codes_from_text_single(text_query, loop)
 
+
+async def suggest_codes_from_text_single(text_query: str, loop: Optional[asyncio.AbstractEventLoop] = None) -> List[Dict[str, Any]]:
+    """Поиск услуг по одному текстовому запросу."""
+    if loop is None:
+        loop = asyncio.get_running_loop()
+    
     def _search():
         query_lower = text_query.strip().lower()
         query_len = len(text_query.strip())
@@ -608,12 +665,28 @@ async def process_codes(message: Message, state: FSMContext, codes: List[str]) -
     summary = format_plan(combined_plan)
     await state.update_data(plan=combined_plan, codes=all_codes, db_session_id=session_id, plan_id=plan_id)
 
+    # Формируем подробный payload для agent draft с названиями услуг
+    plan_items = combined_plan.get("items", [])
+    codes_with_names = [
+        {
+            "code": item.get("code", ""),
+            "name": item.get("display_name", ""),
+            "section": item.get("section", ""),
+            "count": item.get("count", 1),
+            "price": item.get("base_price", 0),
+        }
+        for item in plan_items
+    ]
+    
     agent_payload = {
         "doctor": data.get("doctor_full_display") or data.get("doctor") or "",
         "patient": data.get("patient", ""),
         "card": data.get("card", ""),
         "intake": data.get("intake", ""),
         "codes": all_codes,
+        "services": codes_with_names,  # Добавляем подробную информацию об услугах
+        "total": combined_plan.get("total", 0),
+        "items_count": len(plan_items),
     }
     agent_result = await call_agent_draft(agent_payload)
     if agent_result:
@@ -1143,16 +1216,31 @@ async def handle_voice(message: Message, state: FSMContext):
     data = await state.get_data()
     doctor_id = data.get("doctor_id")
     
-    # Ищем похожие шаблоны планов в истории врача
+    # Ищем похожие шаблоны планов в истории врача (с таймаутом и обработкой ошибок)
     similar_templates = []
     if doctor_id and ideological_plan:
-        await message.answer("🔍 Ищу похожие планы в истории...")
-        similar_templates = await search_similar_plan_templates(
-            ideological_plan=ideological_plan,
-            doctor_id=doctor_id,
-            top_k=3,
-            score_threshold=0.7,
-        )
+        try:
+            await message.answer("🔍 Ищу похожие планы в истории...")
+            # Добавляем явный таймаут для поиска (увеличиваем до 5 секунд и снижаем порог до 0.5)
+            search_task = search_similar_plan_templates(
+                ideological_plan=ideological_plan,
+                doctor_id=doctor_id,
+                top_k=3,
+                score_threshold=0.5,  # Снижаем порог с 0.7 до 0.5 для более широкого поиска
+            )
+            similar_templates = await asyncio.wait_for(search_task, timeout=5.0)  # Увеличиваем таймаут до 5 секунд
+            
+            # Если поиск вернул пустой список, просто продолжаем без предложения шаблонов
+            if not similar_templates:
+                logging.debug(f"No similar templates found for doctor {doctor_id}")
+        except asyncio.TimeoutError:
+            logging.warning(f"Template search timed out for doctor {doctor_id} after 5 seconds")
+            # Не показываем ошибку пользователю, просто продолжаем без предложения шаблонов
+            similar_templates = []
+        except Exception as exc:
+            logging.exception(f"Template search failed for doctor {doctor_id}: {exc}")
+            # Не показываем ошибку пользователю, просто продолжаем без предложения шаблонов
+            similar_templates = []
     
     # Если найдены похожие шаблоны - предлагаем врачу выбрать
     if similar_templates:
@@ -1210,20 +1298,20 @@ async def handle_intake(message: Message, state: FSMContext):
     if doctor_id and ideological_plan:
         try:
             await message.answer("🔍 Ищу похожие планы в истории...")
-            # Добавляем явный таймаут для поиска (уменьшаем до 3 секунд для быстрого ответа)
+            # Добавляем явный таймаут для поиска (увеличиваем до 5 секунд и снижаем порог до 0.5)
             search_task = search_similar_plan_templates(
                 ideological_plan=ideological_plan,
                 doctor_id=doctor_id,
                 top_k=3,
-                score_threshold=0.7,
+                score_threshold=0.5,  # Снижаем порог с 0.7 до 0.5 для более широкого поиска
             )
-            similar_templates = await asyncio.wait_for(search_task, timeout=3.0)
+            similar_templates = await asyncio.wait_for(search_task, timeout=5.0)  # Увеличиваем таймаут до 5 секунд
             
             # Если поиск вернул пустой список, просто продолжаем без предложения шаблонов
             if not similar_templates:
                 logging.debug(f"No similar templates found for doctor {doctor_id}")
         except asyncio.TimeoutError:
-            logging.warning(f"Template search timed out for doctor {doctor_id} after 3 seconds")
+            logging.warning(f"Template search timed out for doctor {doctor_id} after 5 seconds")
             # Не показываем ошибку пользователю, просто продолжаем без предложения шаблонов
             similar_templates = []
         except Exception as exc:
