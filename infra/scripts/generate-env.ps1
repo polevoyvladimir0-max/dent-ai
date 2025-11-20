@@ -186,6 +186,7 @@ foreach ($key in $orderedKeys) {
     if ($secretOverrides.ContainsKey($key)) { $value = $secretOverrides[$key] }
 
     $valueString = To-InvariantString -Value $value
+    $valueString = $valueString.Trim()
     $isSecret = ($meta.ContainsKey('secret') -and [bool]$meta.secret)
     $isRequired = ($meta.ContainsKey('required') -and [bool]$meta.required)
 
@@ -201,7 +202,7 @@ foreach ($key in $orderedKeys) {
     if ($meta.ContainsKey('pattern') -and $valueString) {
         $pattern = $meta.pattern
         if (-not [System.Text.RegularExpressions.Regex]::IsMatch($valueString, $pattern)) {
-            $errors += "Variable '$key' does not match pattern '$pattern'"
+            $errors += "Variable '$key' does not match pattern '$pattern' (value: '$($valueString.Replace("`r", "\\r").Replace("`n", "\\n"))')"
         }
     }
 
