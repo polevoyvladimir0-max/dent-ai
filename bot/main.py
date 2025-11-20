@@ -287,10 +287,30 @@ async def suggest_codes_from_text(text_query: str) -> List[Dict[str, Any]]:
     loop = asyncio.get_running_loop()
 
     def _search():
-        # Улучшаем поиск: используем более строгий порог для коротких запросов
-        # Для запросов типа "синус" нужен более высокий порог, чтобы не находить случайные совпадения
+        query_lower = text_query.strip().lower()
         query_len = len(text_query.strip())
-        if query_len < 5:
+        
+        # Общие термины (приём, консультация, осмотр) требуют более низкий порог
+        general_terms = ["приём", "прием", "консультация", "осмотр", "визит", "приём врача", "приём хирурга"]
+        is_general_term = any(term in query_lower for term in general_terms)
+        
+        # Специфические медицинские термины требуют более строгий порог
+        specific_keywords = ["синус", "имплант", "коронка", "удаление", "лифтинг"]
+        is_specific_term = any(kw in query_lower for kw in specific_keywords)
+        
+        # Определяем порог схожести
+        if is_general_term:
+            # Для общих терминов снижаем порог, чтобы находить больше вариантов
+            threshold = 0.25  # Низкий порог для "приём", "консультация" и т.д.
+        elif is_specific_term:
+            # Для специфических терминов требуем высокий порог
+            if query_len < 5:
+                threshold = 0.5
+            elif query_len < 10:
+                threshold = 0.4
+            else:
+                threshold = 0.35
+        elif query_len < 5:
             # Для очень коротких запросов повышаем порог
             threshold = 0.5
         elif query_len < 10:
@@ -300,10 +320,10 @@ async def suggest_codes_from_text(text_query: str) -> List[Dict[str, Any]]:
             # Для длинных запросов стандартный порог
             threshold = 0.35
         
-        return search_by_query(text_query, top_k=10, score_threshold=threshold)  # Увеличиваем top_k для лучшего выбора
+        return search_by_query(text_query, top_k=15, score_threshold=threshold)  # Увеличиваем top_k для общих терминов
 
     try:
-        results = await asyncio.wait_for(loop.run_in_executor(None, _search), timeout=5.0)  # Уменьшаем таймаут до 5 секунд
+        results = await asyncio.wait_for(loop.run_in_executor(None, _search), timeout=5.0)
     except asyncio.TimeoutError as timeout_err:
         logging.error("Semantic search timed out for query '%s'", text_query)
         raise SemanticSearchUnavailable("semantic timeout") from timeout_err
@@ -313,31 +333,53 @@ async def suggest_codes_from_text(text_query: str) -> List[Dict[str, Any]]:
 
     seen_codes = set()
     suggestions: List[Dict[str, Any]] = []
+    query_lower = text_query.lower()
+    
+    # Определяем тип запроса для фильтрации
+    general_terms = ["приём", "прием", "консультация", "осмотр", "визит"]
+    is_general_term = any(term in query_lower for term in general_terms)
+    specific_keywords = ["синус", "имплант", "коронка", "удаление", "лечение", "анестезия", "лифтинг"]
+    is_specific_term = any(kw in query_lower for kw in specific_keywords)
+    
     for point in results:
         payload = point.payload or {}
         code = str(payload.get("code", "")).strip()
         if not code or code in seen_codes:
             continue
-        # Фильтруем по минимальному score (уже применён в search_by_query, но дополнительно проверяем)
-        query_len = len(text_query.strip())
-        min_score = 0.5 if query_len < 5 else (0.4 if query_len < 10 else 0.35)
-        if point.score < min_score:
-            continue
         
-        # Дополнительная фильтрация: проверяем, что название услуги содержит ключевые слова запроса
         display_name_lower = (payload.get("display_name", "") or "").lower()
-        query_lower = text_query.lower()
-        query_words = query_lower.split()
+        section_lower = (payload.get("section", "") or "").lower()
         
-        # Если запрос содержит медицинские термины, проверяем их наличие в названии
-        medical_keywords = ["синус", "имплант", "коронка", "удаление", "лечение", "анестезия", "лифтинг"]
-        has_medical_keyword = any(kw in query_lower for kw in medical_keywords)
-        
-        if has_medical_keyword:
-            # Для медицинских терминов требуем более строгое совпадение
-            keyword_found = any(kw in display_name_lower for kw in medical_keywords if kw in query_lower)
+        # Для общих терминов более мягкая фильтрация
+        if is_general_term:
+            # Для "приём хирурга" ищем что-то связанное с хирургией или приёмом
+            # Проверяем наличие ключевых слов из запроса в названии или разделе
+            query_words = [w for w in query_lower.split() if len(w) > 2 and w not in general_terms]
+            if query_words:
+                # Если есть специфические слова (например, "хирурга"), проверяем их наличие
+                keyword_found = any(word in display_name_lower or word in section_lower for word in query_words)
+                if not keyword_found and point.score < 0.3:
+                    continue  # Пропускаем только если очень низкий score
+            # Для общих терминов принимаем результаты с score >= 0.25
+            if point.score < 0.25:
+                continue
+        elif is_specific_term:
+            # Для специфических терминов требуем более строгое совпадение
+            query_len = len(text_query.strip())
+            min_score = 0.5 if query_len < 5 else (0.4 if query_len < 10 else 0.35)
+            if point.score < min_score:
+                continue
+            
+            # Проверяем наличие ключевых слов в названии
+            keyword_found = any(kw in display_name_lower for kw in specific_keywords if kw in query_lower)
             if not keyword_found and point.score < 0.5:
                 continue  # Пропускаем, если нет совпадения ключевых слов и низкий score
+        else:
+            # Для остальных запросов стандартная фильтрация
+            query_len = len(text_query.strip())
+            min_score = 0.5 if query_len < 5 else (0.4 if query_len < 10 else 0.35)
+            if point.score < min_score:
+                continue
         
         seen_codes.add(code)
         suggestions.append(
