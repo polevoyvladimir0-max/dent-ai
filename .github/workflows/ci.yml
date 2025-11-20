@@ -921,13 +921,25 @@ jobs:
             echo "Cleaning up unused Docker resources..."
             # Удаляем остановленные контейнеры старше 24 часов
             docker container prune -f --filter "until=24h" || true
-            # Удаляем неиспользуемые образы (кроме последних 3 версий)
+            # Удаляем неиспользуемые образы старше 7 дней
             docker image prune -af --filter "until=168h" || true
+            # Удаляем старые версии образов dent-ai/* (оставляем последние 5 SHA)
+            for image_name in app bot base backup; do
+              # Получаем все образы с тегом SHA (не latest) и сортируем по дате
+              # Удаляем все кроме последних 5
+              docker images "${REGISTRY}/dent-ai/${image_name}" --format "{{.ID}} {{.CreatedAt}}" --filter "dangling=false" | \
+                grep -v "latest" | \
+                sort -k2 -r | \
+                tail -n +6 | \
+                awk '{print $1}' | \
+                xargs -r docker rmi -f || true
+            done
             # Удаляем неиспользуемые volumes старше 7 дней
             docker volume prune -f --filter "until=168h" || true
             # Удаляем build cache старше 24 часов
             docker builder prune -af --filter "until=24h" || true
             # Показываем использование диска
+            echo "Docker disk usage after cleanup:"
             docker system df
 
 
