@@ -212,6 +212,14 @@ jobs:
 
 
 
+      - name: Install Python dependencies for token minting
+
+        run: |
+
+          python -m pip install --upgrade pip
+
+          pip install pyjwt[crypto]
+
       - name: Mint YCR IAM token
 
         if: env.REGISTRY_PASSWORD != ''
@@ -226,9 +234,11 @@ jobs:
 
           set -euo pipefail
 
-          result=$(python .github/scripts/mint_ycr_token.py)
+          result=$(python .github/scripts/mint_ycr_token.py 2>&1) || true
 
+          echo "Token minting output:"
 
+          echo "$result"
 
           if [ -n "$result" ]; then
 
@@ -240,6 +250,8 @@ jobs:
 
                   printf 'EFFECTIVE_REGISTRY_USER=%s\n' "$value" >> "$GITHUB_ENV"
 
+                  echo "Set EFFECTIVE_REGISTRY_USER"
+
                   ;;
 
                 token)
@@ -248,11 +260,17 @@ jobs:
 
                   printf 'EFFECTIVE_REGISTRY_PASSWORD=%s\n' "$value" >> "$GITHUB_ENV"
 
+                  echo "Set EFFECTIVE_REGISTRY_PASSWORD (token length: ${#value})"
+
                   ;;
 
               esac
 
             done <<< "$result"
+
+          else
+
+            echo "Warning: No token generated from mint script"
 
           fi
 
