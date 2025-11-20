@@ -866,6 +866,9 @@ jobs:
 
             docker compose up -d --remove-orphans
 
+            # Удаляем остановленные контейнеры перед unseal
+            docker compose ps --filter "status=exited" -q | xargs -r docker rm -f || true
+
             sudo env "PROJECT_DIR=$DEPLOY_PATH" "ENV_FILE=$DEPLOY_PATH/.env" bash ./infra/scripts/vault-auto-unseal.sh
 
             HEALTH_URL="http://127.0.0.1:8000/ping"
@@ -914,7 +917,18 @@ jobs:
 
             fi
 
-            docker image prune -f
+            # Очистка неиспользуемых Docker ресурсов
+            echo "Cleaning up unused Docker resources..."
+            # Удаляем остановленные контейнеры старше 24 часов
+            docker container prune -f --filter "until=24h" || true
+            # Удаляем неиспользуемые образы (кроме последних 3 версий)
+            docker image prune -af --filter "until=168h" || true
+            # Удаляем неиспользуемые volumes старше 7 дней
+            docker volume prune -f --filter "until=168h" || true
+            # Удаляем build cache старше 24 часов
+            docker builder prune -af --filter "until=24h" || true
+            # Показываем использование диска
+            docker system df
 
 
 
