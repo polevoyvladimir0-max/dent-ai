@@ -308,6 +308,7 @@ services:
     environment:
       TELEGRAM_BOT_TOKEN: ${BOT_TOKEN}
       PRICING_API_BASE: http://app:8000
+      QDRANT_URL: http://qdrant:6333
       REDIS_HOST: redis
       REDIS_PORT: 6379
       REDIS_PASSWORD: ${REDIS_PASSWORD}
