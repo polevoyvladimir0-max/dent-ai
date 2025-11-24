@@ -101,8 +101,8 @@ def save_template_embedding(
 def search_similar_templates(
     query: str,
     doctor_id: int,
-    top_k: int = 3,
-    score_threshold: float = 0.7,
+    top_k: int = 5,  # Увеличиваем с 3 до 5 для большего выбора
+    score_threshold: float = 0.35,  # Снижаем порог с 0.7 до 0.35 для более широкого поиска
 ) -> List[models.ScoredPoint]:
     """
     Найти похожие шаблоны планов по идеологическому запросу.
@@ -116,32 +116,41 @@ def search_similar_templates(
     Returns:
         Список похожих шаблонов с их метаданными
     """
-    ensure_collection()
-    
-    model = load_model()
-    query_vector = model.encode(query).tolist()
-    
-    client = get_qdrant_client()
-    
-    # Фильтр по doctor_id
-    filter_condition = models.Filter(
-        must=[
-            models.FieldCondition(
-                key="doctor_id",
-                match=models.MatchValue(value=doctor_id),
-            ),
-        ],
-    )
-    
-    results = client.search(
-        collection_name=PLAN_TEMPLATES_COLLECTION,
-        query_vector=query_vector,
-        query_filter=filter_condition,
-        limit=top_k,
-        score_threshold=score_threshold,
-    )
-    
-    return results
+    try:
+        ensure_collection()
+        
+        client = get_qdrant_client()
+        
+        # Проверяем существование коллекции
+        if not client.collection_exists(PLAN_TEMPLATES_COLLECTION):
+            logger.warning(f"Collection {PLAN_TEMPLATES_COLLECTION} does not exist, returning empty results")
+            return []
+        
+        model = load_model()
+        query_vector = model.encode(query).tolist()
+        
+        # Фильтр по doctor_id
+        filter_condition = models.Filter(
+            must=[
+                models.FieldCondition(
+                    key="doctor_id",
+                    match=models.MatchValue(value=int(doctor_id)),  # Явно преобразуем в int
+                ),
+            ],
+        )
+        
+        results = client.search(
+            collection_name=PLAN_TEMPLATES_COLLECTION,
+            query_vector=query_vector,
+            query_filter=filter_condition,
+            limit=top_k,
+            score_threshold=score_threshold,
+        )
+        
+        return results
+    except Exception as exc:
+        logger.exception(f"Failed to search similar templates: {exc}")
+        return []  # Возвращаем пустой список при ошибке
 
 
 def delete_template_embedding(template_id: int) -> None:

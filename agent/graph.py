@@ -29,6 +29,9 @@ class AgentState(dict):
     card: str
     intake: str
     codes: List[str]
+    services: List[Dict[str, Any]]  # Подробная информация об услугах
+    total: float
+    items_count: int
     pricing: List[Dict[str, Any]]
     plan_draft: str
     comments: str
@@ -126,19 +129,94 @@ def retrieve_pricing(state: AgentState) -> AgentState:
     return state
 
 def generate_stub_plan(state: AgentState) -> str:
+    """Генерирует базовый план на основе услуг."""
     doctor = state.get("doctor", "")
     patient = state.get("patient", "")
     intake = state.get("intake", "")
-    codes = ", ".join(state.get("codes", []))
-    return (
-        f"Доктор {doctor} предложил базовый план для {patient}.\n"
-        f"Коды услуг: {codes}.\n"
-        f"Описание: {intake}.\n"
-        "Шаги:\n"
-        "1. Консультация и диагностика.\n"
-        "2. Лечение согласно кодам.\n"
-        "3. Контрольный визит."
+    services = state.get("services", [])
+    codes = state.get("codes", [])
+    
+    # Анализируем услуги и формируем этапы
+    steps = []
+    
+    # Группируем услуги по типам
+    anesthesia_services = []
+    removal_services = []
+    implant_services = []
+    suture_services = []
+    examination_services = []
+    other_services = []
+    
+    for service in services:
+        name_lower = (service.get("name", "") or "").lower()
+        code = service.get("code", "")
+        
+        if "анестез" in name_lower or code.startswith("800"):
+            anesthesia_services.append(service)
+        elif "имплант" in name_lower or "формирователь" in name_lower or code == "809103":
+            implant_services.append(service)
+        elif "удаление" in name_lower or code.startswith("8091"):
+            removal_services.append(service)
+        elif "шв" in name_lower or code == "809000":
+            suture_services.append(service)
+        elif "прием" in name_lower or "осмотр" in name_lower or "консультация" in name_lower or code.startswith("202"):
+            examination_services.append(service)
+        else:
+            other_services.append(service)
+    
+    # Формируем этапы в логическом порядке (с последовательной нумерацией)
+    step_num = 1
+    
+    if examination_services:
+        exam_names = [s.get("name", "") for s in examination_services[:2]]
+        steps.append(f"{step_num}. {', '.join(exam_names)}")
+        step_num += 1
+    
+    if anesthesia_services:
+        anesth_names = [s.get("name", "") for s in anesthesia_services[:2]]
+        steps.append(f"{step_num}. {', '.join(anesth_names)}")
+        step_num += 1
+    
+    if removal_services:
+        removal_names = [s.get("name", "") for s in removal_services[:2]]
+        steps.append(f"{step_num}. {', '.join(removal_names)}")
+        step_num += 1
+    
+    if implant_services:
+        implant_names = [s.get("name", "") for s in implant_services[:2]]
+        steps.append(f"{step_num}. {', '.join(implant_names)}")
+        step_num += 1
+    
+    if suture_services:
+        suture_names = [s.get("name", "") for s in suture_services[:2]]
+        steps.append(f"{step_num}. {', '.join(suture_names)}")
+        step_num += 1
+    
+    if other_services:
+        other_names = [s.get("name", "") for s in other_services[:3]]  # Показываем до 3 услуг
+        steps.append(f"{step_num}. {', '.join(other_names)}")
+        step_num += 1
+    
+    # Если есть повторный осмотр - добавляем в конец
+    if len(examination_services) > 1:
+        steps.append(f"{step_num}. Повторный осмотр и контроль")
+    
+    # Если шагов нет - используем базовый шаблон
+    if not steps:
+        steps = [
+            "1. Консультация и диагностика",
+            "2. Лечение согласно кодам",
+            "3. Контрольный визит"
+        ]
+    
+    plan_text = (
+        f"Доктор {doctor} предложил план лечения для {patient}.\n"
+        f"Коды услуг: {', '.join(codes) if codes else 'не указаны'}.\n"
+        f"Описание: {intake if intake else 'не указано'}.\n\n"
+        f"Этапы лечения:\n" + "\n".join(steps)
     )
+    
+    return plan_text
 
 def build_plan(state: AgentState) -> AgentState:
     if llm is None:
@@ -171,15 +249,46 @@ def build_plan(state: AgentState) -> AgentState:
     if specialization:
         preference_section += f"\nСпециализация врача: {specialization}"
 
+    # Формируем детальное описание услуг для LLM
+    services = state.get("services", [])
+    services_text = ""
+    if services:
+        services_list = []
+        for svc in services:
+            name = svc.get("name", "")
+            code = svc.get("code", "")
+            section = svc.get("section", "")
+            count = svc.get("count", 1)
+            price = svc.get("price", 0)
+            services_list.append(f"- {code} {name} ({section}, {count} шт., {price} ₽)")
+        services_text = "\nУслуги в плане:\n" + "\n".join(services_list)
+    
+    total = state.get("total", 0)
+    total_text = f"\nОбщая стоимость: {total:.2f} ₽" if total > 0 else ""
+    
     system_prompt = base_prompt or (
-        "Ты ассистент стоматологической клиники. Составь план лечения на русском языке,"
-        " учитывая предоставленные данные, специализацию врача и его недавние корректировки."
-        " Включи поэтапное описание, бюджет с диапазоном и рекомендации пациенту."
+        "Ты умный ассистент стоматолога. Твоя задача - составить детальный, конкретный план лечения "
+        "на основе предоставленных услуг и описания врача.\n\n"
+        "ВАЖНО:\n"
+        "1. Анализируй конкретные услуги из списка и формируй этапы в логическом порядке (анестезия → удаление → имплантация → швы → контроль)\n"
+        "2. Используй НАЗВАНИЯ услуг из списка, а не общие фразы\n"
+        "3. Учитывай последовательность: сначала диагностика/приём, затем анестезия, затем хирургические манипуляции, затем швы, затем контроль\n"
+        "4. Если есть имплантация - обязательно упомяни установку формирователя десны и последующий контроль\n"
+        "5. Если есть удаление - упомяни сложность (простое/сложное) если это указано в услугах\n"
+        "6. Будь конкретным: вместо 'Лечение согласно кодам' пиши 'Удаление зуба 2.4 с разъединением корней'\n"
+        "7. Учитывай бренды и материалы, если они указаны в описании (Straumann, Astra и т.д.)\n"
+        "8. Формат: краткие, конкретные этапы с номерами, без лишних слов"
     )
 
     human_prompt = (
-        f"Доктор: {doctor}\nПациент: {patient}\nКоды услуг: {codes}"
-        f"\nОписание консультации: {intake}{preference_section}{feedback_section}"
+        f"Доктор: {doctor}\n"
+        f"Пациент: {patient}\n"
+        f"Описание консультации: {intake}\n"
+        f"Коды услуг: {codes if codes else 'не указаны'}"
+        f"{services_text}"
+        f"{total_text}"
+        f"{preference_section}{feedback_section}\n\n"
+        f"Составь детальный план лечения с конкретными этапами на основе указанных услуг."
     )
 
     response = llm.invoke([

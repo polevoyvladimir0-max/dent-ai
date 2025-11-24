@@ -147,6 +147,7 @@ class SessionState(StatesGroup):
     intake = State()
     template_selection = State()  # Выбор шаблона плана из истории
     plan_codes = State()
+    plan_stage_selection = State()  # Выбор или создание этапа плана лечения
     plan_disambiguation = State()
     plan_confirm = State()
     plan_feedback_rating = State()
@@ -216,8 +217,8 @@ def format_doctor_display_obj(
 async def search_similar_plan_templates(
     ideological_plan: str,
     doctor_id: int,
-    top_k: int = 3,
-    score_threshold: float = 0.5,  # Снижаем дефолтный порог с 0.7 до 0.5 для более широкого поиска
+    top_k: int = 5,  # Увеличиваем с 3 до 5 для большего выбора
+    score_threshold: float = 0.35,  # Снижаем порог с 0.5 до 0.35 для более широкого поиска похожих планов
 ) -> List[Dict[str, Any]]:
     """
     Ищет похожие шаблоны планов в истории врача по идеологическому запросу.
@@ -682,7 +683,50 @@ async def process_codes(message: Message, state: FSMContext, codes: List[str]) -
 
     session_id = data.get("db_session_id")
     plan_id = data.get("plan_id")
-    combined_plan = combine_plans(data.get("plan"), new_plan, all_codes)
+    
+    # Проверяем, используются ли этапы
+    use_stages = data.get("use_stages", False)
+    plan_stages = data.get("plan_stages", [])
+    current_stage_index = data.get("current_stage_index", None)
+    
+    if use_stages and plan_stages and current_stage_index is not None:
+        # Работаем с этапами - добавляем услуги к текущему этапу
+        if current_stage_index < len(plan_stages):
+            current_stage = plan_stages[current_stage_index]
+            # Получаем существующие items текущего этапа
+            existing_stage_items = current_stage.get("items", [])
+            # Объединяем с новыми items
+            stage_combined = combine_plans(
+                {"items": existing_stage_items, "total": 0},
+                new_plan,
+                current_stage.get("codes", []) + codes
+            )
+            # Обновляем текущий этап
+            current_stage["items"] = stage_combined.get("items", [])
+            current_stage["codes"] = list(set(current_stage.get("codes", []) + codes))
+            plan_stages[current_stage_index] = current_stage
+            
+            # Формируем общий план из всех этапов для подсчёта итоговой суммы
+            all_stage_items = []
+            for stage in plan_stages:
+                all_stage_items.extend(stage.get("items", []))
+            
+            # Объединяем все items из всех этапов в общий план
+            combined_plan = combine_plans(
+                {"items": all_stage_items, "total": 0},
+                {"items": [], "total": 0},
+                all_codes
+            )
+            
+            # Добавляем информацию об этапах в план
+            combined_plan["stages"] = plan_stages
+            combined_plan["use_stages"] = True
+            
+            # Сохраняем обновлённые этапы в состоянии
+            await state.update_data(plan_stages=plan_stages)
+    else:
+        # Обычный план без этапов
+        combined_plan = combine_plans(data.get("plan"), new_plan, all_codes)
 
     with get_db() as db:
         session_record = db.get(DBSession, session_id) if session_id else None
@@ -765,17 +809,42 @@ async def process_codes(message: Message, state: FSMContext, codes: List[str]) -
         total=combined_plan.get("total"),
         items=len(combined_plan.get("items", [])),
     )
-    await message.answer(
-        "Продолжить добавление услуг или завершить план? Напиши 'продолжить' или 'завершить'.",
-        reply_markup=MAIN_KEYBOARD,
-    )
+    # Проверяем, используются ли этапы (получаем заново, т.к. могло быть обновлено)
+    use_stages = data.get("use_stages", False)
+    plan_stages = data.get("plan_stages", [])
+    
+    if use_stages and plan_stages:
+        # Для многоэтапного плана предлагаем добавить следующий этап или завершить
+        await message.answer(
+            "📋 Добавить следующий этап лечения или завершить план?\n"
+            "Напиши 'следующий этап' для создания нового этапа, или 'завершить' для финализации плана.",
+            reply_markup=MAIN_KEYBOARD,
+        )
+    else:
+        await message.answer(
+            "Продолжить добавление услуг или завершить план? Напиши 'продолжить' или 'завершить'.",
+            reply_markup=MAIN_KEYBOARD,
+        )
     await state.set_state(SessionState.plan_confirm)
 
 
 async def finalize_current_plan(message: Message, state: FSMContext) -> None:
     data = await state.get_data()
     plan = data.get("plan")
-    if not plan or not plan.get("items"):
+    use_stages = data.get("use_stages", False)
+    plan_stages = data.get("plan_stages", [])
+    
+    # Для многоэтапных планов проверяем, что есть хотя бы один этап с услугами
+    if use_stages and plan_stages:
+        has_items = any(stage.get("items") for stage in plan_stages)
+        if not has_items:
+            await message.answer(
+                "План пустой. Добавь услуги или опиши их словами, чтобы я сформировал финальную версию.",
+                reply_markup=MAIN_KEYBOARD,
+            )
+            await state.set_state(SessionState.plan_codes)
+            return
+    elif not plan or not plan.get("items"):
         await message.answer(
             "План пустой. Добавь услуги или опиши их словами, чтобы я сформировал финальную версию.",
             reply_markup=MAIN_KEYBOARD,
@@ -1019,16 +1088,58 @@ def combine_plans(existing: Optional[dict], new_part: dict, order_sequence: List
 
 
 def format_plan(plan: dict) -> str:
-    lines = []
-    for item in plan.get("items", []):
-        code = item.get("code", "")
-        name = item.get("display_name", "")
-        count = item.get("count", 1)
-        item_sum = item.get("sum", 0)
-        lines.append(f"• {code}: {name} × {count} → {item_sum} ₽")
-    total = plan.get("total", 0)
-    body = "\n".join(lines) if lines else "(пусто)"
-    return f"{body}\n\nИтого: {total} ₽"
+    """Форматирует план лечения, учитывая этапы если они есть."""
+    use_stages = plan.get("use_stages", False)
+    stages = plan.get("stages", [])
+    
+    if use_stages and stages:
+        # Форматируем многоэтапный план
+        lines = []
+        total_all = 0.0
+        
+        for stage_idx, stage in enumerate(stages, start=1):
+            stage_name = stage.get("name", f"Этап {stage_idx}")
+            stage_items = stage.get("items", [])
+            stage_total = 0.0
+            
+            if stage_items:
+                lines.append(f"\n📋 {stage_name}:")
+                for item in stage_items:
+                    code = item.get("code", "")
+                    name = item.get("display_name", "")
+                    count = item.get("count", 1)
+                    item_sum = item.get("sum", 0) if "sum" in item else (item.get("base_price", 0) * count)
+                    stage_total += item_sum
+                    lines.append(f"  • {code}: {name} × {count} → {item_sum:.2f} ₽")
+                lines.append(f"  Итого по этапу: {stage_total:.2f} ₽")
+                total_all += stage_total
+        
+        # Если есть общие items (для обратной совместимости), добавляем их
+        general_items = plan.get("items", [])
+        if general_items and not any(stage.get("items") for stage in stages):
+            # Если в этапах нет items, используем общие items
+            for item in general_items:
+                code = item.get("code", "")
+                name = item.get("display_name", "")
+                count = item.get("count", 1)
+                item_sum = item.get("sum", 0)
+                total_all += item_sum
+                lines.append(f"• {code}: {name} × {count} → {item_sum:.2f} ₽")
+        
+        body = "\n".join(lines) if lines else "(пусто)"
+        return f"{body}\n\n💰 Общая сумма: {total_all:.2f} ₽"
+    else:
+        # Обычный формат без этапов
+        lines = []
+        for item in plan.get("items", []):
+            code = item.get("code", "")
+            name = item.get("display_name", "")
+            count = item.get("count", 1)
+            item_sum = item.get("sum", 0)
+            lines.append(f"• {code}: {name} × {count} → {item_sum:.2f} ₽")
+        total = plan.get("total", 0)
+        body = "\n".join(lines) if lines else "(пусто)"
+        return f"{body}\n\nИтого: {total:.2f} ₽"
 
 async def call_agent_draft(payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     try:
@@ -1250,12 +1361,26 @@ async def handle_card(message: Message, state: FSMContext):
     await message.answer("🎙 Надиктуй план лечения (голос или текст).", reply_markup=MAIN_KEYBOARD)
     await state.set_state(SessionState.intake)
 
-@dp.message(SessionState.intake, F.voice)
-async def handle_voice(message: Message, state: FSMContext):
+async def process_voice_message(message: Message, state: FSMContext) -> Optional[str]:
+    """
+    Универсальная функция для обработки голосовых сообщений.
+    Распознаёт голос и возвращает текст, или None в случае ошибки.
+    """
     await message.answer("⌛ Распознаю аудио...")
     try:
         file_path = await download_voice(bot, message)
         text = await transcribe_voice(file_path)
+        
+        if not text or not text.strip():
+            await message.answer(
+                "Не удалось распознать текст из голосового сообщения. Попробуй записать заново.",
+                reply_markup=MAIN_KEYBOARD,
+            )
+            return None
+        
+        # Показываем распознанный текст пользователю
+        await message.answer(f"🎙 Распознал: {text}", reply_markup=MAIN_KEYBOARD)
+        return text.strip()
     except Exception as voice_exc:
         logging.exception(f"Voice transcription failed: {voice_exc}")
         await message.answer(
@@ -1263,7 +1388,15 @@ async def handle_voice(message: Message, state: FSMContext):
             "Попробуй отправить текст или записать голосовое сообщение заново.",
             reply_markup=MAIN_KEYBOARD,
         )
+        return None
+
+
+@dp.message(SessionState.intake, F.voice)
+async def handle_voice(message: Message, state: FSMContext):
+    text = await process_voice_message(message, state)
+    if not text:
         return
+    
     ideological_plan = text
     await state.update_data(intake=ideological_plan)
     
@@ -1279,8 +1412,8 @@ async def handle_voice(message: Message, state: FSMContext):
             search_task = search_similar_plan_templates(
                 ideological_plan=ideological_plan,
                 doctor_id=doctor_id,
-                top_k=3,
-                score_threshold=0.5,  # Снижаем порог с 0.7 до 0.5 для более широкого поиска
+                top_k=5,  # Увеличиваем с 3 до 5 для большего выбора
+                score_threshold=0.35,  # Снижаем порог с 0.5 до 0.35 для более широкого поиска
             )
             similar_templates = await asyncio.wait_for(search_task, timeout=5.0)  # Увеличиваем таймаут до 5 секунд
             
@@ -1326,13 +1459,16 @@ async def handle_voice(message: Message, state: FSMContext):
         await state.set_state(SessionState.template_selection)
         return
     
-    # Если похожих шаблонов нет - продолжаем как обычно
+    # Если похожих шаблонов нет - спрашиваем про этапы лечения
     await message.answer(
-        f"🎙 Распознал: {text}\n\nТеперь отправь коды или опиши услуги (например: 'имплантат Straumann', 'коронка диоксид').",
+        f"🎙 Распознал: {text}\n\n"
+        "📋 План лечения будет многоэтапным? "
+        "Например: первый этап - пародонтология и санация, второй - временное протезирование.\n\n"
+        "Напиши 'да' если нужны этапы, или 'нет' для простого плана.",
         reply_markup=MAIN_KEYBOARD,
     )
     await maybe_smalltalk(message, "intake_ack", reply_markup=None, intake=text)
-    await state.set_state(SessionState.plan_codes)
+    await state.set_state(SessionState.plan_stage_selection)
 
 
 @dp.message(SessionState.intake)
@@ -1356,8 +1492,8 @@ async def handle_intake(message: Message, state: FSMContext):
             search_task = search_similar_plan_templates(
                 ideological_plan=ideological_plan,
                 doctor_id=doctor_id,
-                top_k=3,
-                score_threshold=0.5,  # Снижаем порог с 0.7 до 0.5 для более широкого поиска
+                top_k=5,  # Увеличиваем с 3 до 5 для большего выбора
+                score_threshold=0.35,  # Снижаем порог с 0.5 до 0.35 для более широкого поиска
             )
             similar_templates = await asyncio.wait_for(search_task, timeout=5.0)  # Увеличиваем таймаут до 5 секунд
             
@@ -1402,13 +1538,128 @@ async def handle_intake(message: Message, state: FSMContext):
         await state.set_state(SessionState.template_selection)
         return
     
-    # Если похожих шаблонов нет - продолжаем как обычно
+    # Если похожих шаблонов нет - спрашиваем про этапы лечения
     await message.answer(
-        "Отлично. Теперь отправь коды услуг или опиши словами (например: 'имплантат Straumann').",
+        "📋 План лечения будет многоэтапным? "
+        "Например: первый этап - пародонтология и санация, второй - временное протезирование.\n\n"
+        "Напиши 'да' если нужны этапы, или 'нет' для простого плана.",
         reply_markup=MAIN_KEYBOARD,
     )
     await maybe_smalltalk(message, "intake_ack", reply_markup=None, intake=ideological_plan)
-    await state.set_state(SessionState.plan_codes)
+    await state.set_state(SessionState.plan_stage_selection)
+
+
+# Обработчик голосовых сообщений для plan_stage_selection
+@dp.message(SessionState.plan_stage_selection, F.voice)
+async def handle_voice_plan_stage_selection(message: Message, state: FSMContext):
+    text = await process_voice_message(message, state)
+    if not text:
+        return
+    message.text = text
+    await handle_plan_stage_selection(message, state)
+
+
+@dp.message(SessionState.plan_stage_selection)
+async def handle_plan_stage_selection(message: Message, state: FSMContext):
+    """Обработка выбора многоэтапного плана или простого плана."""
+    # Проверяем команды
+    if await check_commands_in_state(message, state):
+        return
+    
+    raw = (message.text or "").strip().lower()
+    
+    # Если пользователь хочет многоэтапный план
+    if raw in {"да", "yes", "многоэтапный", "этапы", "этапный"}:
+        # Создаём структуру для этапов в состоянии
+        stages = []
+        current_stage = {
+            "name": "Первый этап",
+            "items": [],
+            "codes": [],
+        }
+        stages.append(current_stage)
+        
+        await state.update_data(
+            plan_stages=stages,
+            current_stage_index=0,
+            use_stages=True,
+        )
+        
+        await message.answer(
+            "📋 Назови первый этап лечения (например: 'Пародонтология и санация', 'Разборка старых конструкций', 'Хирургия').\n\n"
+            "Или напиши 'пропустить' чтобы начать с добавления услуг.",
+            reply_markup=MAIN_KEYBOARD,
+        )
+        # Пока оставляем переход к plan_codes, но можно добавить отдельное состояние для названия этапа
+        # Для упрощения, если пользователь сразу пишет название этапа - используем его
+        await state.set_state(SessionState.plan_codes)
+        return
+    
+    # Если пользователь не хочет этапы или сказал "нет"
+    if raw in {"нет", "no", "простой", "без этапов", "обычный"}:
+        await state.update_data(
+            plan_stages=[],
+            current_stage_index=None,
+            use_stages=False,
+        )
+        await message.answer(
+            "Ок, создаю простой план. Отправь коды услуг или опиши словами (например: 'имплантат Straumann').",
+            reply_markup=MAIN_KEYBOARD,
+        )
+        await state.set_state(SessionState.plan_codes)
+        return
+    
+    # Если ответ не распознан - возможно, пользователь сразу указал название этапа
+    # Или пытаемся понять через LLM
+    if len(raw) > 5:  # Если текст достаточно длинный, возможно это название этапа
+        # Создаём этапы с указанным названием
+        stages = []
+        current_stage = {
+            "name": message.text.strip(),  # Используем оригинальный текст (не lower)
+            "items": [],
+            "codes": [],
+        }
+        stages.append(current_stage)
+        
+        await state.update_data(
+            plan_stages=stages,
+            current_stage_index=0,
+            use_stages=True,
+        )
+        
+        await message.answer(
+            f"✅ Создаю первый этап: {current_stage['name']}\n\n"
+            "Теперь отправь коды услуг или опиши словами для этого этапа.",
+            reply_markup=MAIN_KEYBOARD,
+        )
+        await state.set_state(SessionState.plan_codes)
+        return
+    
+    # Если не поняли - переспрашиваем
+    await message.answer(
+        "Не понял. Напиши 'да' для многоэтапного плана, 'нет' для простого плана, или укажи название этапа (например: 'Пародонтология и санация').",
+        reply_markup=MAIN_KEYBOARD,
+    )
+
+
+# Обработчик голосовых сообщений для template_selection
+@dp.message(SessionState.template_selection, F.voice)
+async def handle_voice_template_selection(message: Message, state: FSMContext):
+    text = await process_voice_message(message, state)
+    if not text:
+        return
+    message.text = text
+    await handle_template_selection(message, state)
+
+
+# Обработчик голосовых сообщений для plan_confirm
+@dp.message(SessionState.plan_confirm, F.voice)
+async def handle_voice_plan_confirm(message: Message, state: FSMContext):
+    text = await process_voice_message(message, state)
+    if not text:
+        return
+    message.text = text
+    await handle_plan_confirm(message, state)
 
 
 @dp.message(SessionState.template_selection)
@@ -1523,13 +1774,51 @@ async def handle_template_selection(message: Message, state: FSMContext):
     await process_codes(message, state, adapted_codes)
 
 
+# Обработчик голосовых сообщений для plan_codes
+@dp.message(SessionState.plan_codes, F.voice)
+async def handle_voice_plan_codes(message: Message, state: FSMContext):
+    text = await process_voice_message(message, state)
+    if not text:
+        return
+    # Создаём фиктивное текстовое сообщение
+    message.text = text
+    await handle_plan_codes(message, state)
+
+
 @dp.message(SessionState.plan_codes)
 async def handle_plan_codes(message: Message, state: FSMContext):
     # Проверяем команды
     if await check_commands_in_state(message, state):
         return
     
-    raw = message.text.strip()
+    raw = (message.text or "").strip()
+    if not raw:
+        return
+    
+    # Проверяем, используется ли многоэтапный план и является ли текст названием этапа
+    data = await state.get_data()
+    use_stages = data.get("use_stages", False)
+    plan_stages = data.get("plan_stages", [])
+    current_stage_index = data.get("current_stage_index", None)
+    
+    # Если используется этапы и текст похож на название этапа (длинный, без кодов, содержит медицинские термины)
+    if use_stages and current_stage_index is not None and plan_stages:
+        stage_name_keywords = ["этап", "пародонтолог", "санация", "протезирование", "хирургия", "ортодонтия", "терапия", "лечение", "разборка", "конструкция"]
+        contains_stage_keywords = any(kw in raw.lower() for kw in stage_name_keywords)
+        contains_codes_pattern = bool(re.search(r'\b\d{6}\b', raw))
+        
+        # Если текст похож на название этапа (нет кодов, есть ключевые слова этапов, длина > 10)
+        if not contains_codes_pattern and contains_stage_keywords and len(raw) > 10:
+            # Обновляем название текущего этапа
+            if current_stage_index < len(plan_stages):
+                plan_stages[current_stage_index]["name"] = raw
+                await state.update_data(plan_stages=plan_stages)
+                await message.answer(
+                    f"✅ Название этапа обновлено: {raw}\n\n"
+                    "Теперь отправь коды услуг или опиши словами для этого этапа.",
+                    reply_markup=MAIN_KEYBOARD,
+                )
+                return
     
     # Если сообщение похоже на вопрос или не похоже на код/описание услуги - используем LLM
     if LLM_CLIENT and (raw.endswith("?") or len(raw.split()) > 5 or raw.lower() in {"найди в базе", "найти", "поиск"}):
@@ -1673,22 +1962,82 @@ async def handle_plan_codes(message: Message, state: FSMContext):
     await process_codes(message, state, codes)
 
 
+# Обработчик голосовых сообщений для plan_disambiguation
+@dp.message(SessionState.plan_disambiguation, F.voice)
+async def handle_voice_plan_disambiguation(message: Message, state: FSMContext):
+    text = await process_voice_message(message, state)
+    if not text:
+        return
+    message.text = text
+    await handle_plan_disambiguation(message, state)
+
+
 @dp.message(SessionState.plan_disambiguation)
 async def handle_plan_disambiguation(message: Message, state: FSMContext):
     # Проверяем команды
     if await check_commands_in_state(message, state):
         return
     
+    raw = (message.text or "").strip()
+    raw_lower = raw.lower()
+    
+    # Проверяем естественные выходы
+    if raw_lower in {"отмена", "cancel", "нет", "no", "назад", "back"}:
+        await state.update_data(candidate_codes=None, raw_text=None)
+        await message.answer("Окей, выбери коды заново или опиши услуги ещё раз.", reply_markup=MAIN_KEYBOARD)
+        await state.set_state(SessionState.plan_codes)
+        return
+    
+    if raw_lower in {"завершить", "finish", "готово", "done", "оценить", "оценить план"}:
+        # Переходим к финализации плана
+        await state.update_data(candidate_codes=None, raw_text=None)
+        data = await state.get_data()
+        if data.get("plan_id"):
+            await state.set_state(SessionState.plan_confirm)
+            await message.answer("Переходим к финализации плана.", reply_markup=MAIN_KEYBOARD)
+            # Показываем текущий план и предлагаем завершить
+            plan = data.get("plan")
+            if plan:
+                summary = format_plan(plan)
+                await message.answer(summary, reply_markup=MAIN_KEYBOARD)
+            await message.answer(
+                "Продолжить добавление услуг или завершить план? Напиши 'продолжить' или 'завершить'.",
+                reply_markup=MAIN_KEYBOARD,
+            )
+        else:
+            await message.answer("Сначала добавь услуги в план.", reply_markup=MAIN_KEYBOARD)
+            await state.set_state(SessionState.plan_codes)
+        return
+    
     data = await state.get_data()
     candidates: List[Dict[str, Any]] = data.get("candidate_codes", [])
+    
+    # Если пользователь ввёл коды или описание услуг - обрабатываем как новый запрос
+    contains_codes = bool(re.search(r'\b\d{6}\b', raw))  # Проверяем наличие 6-значных кодов
+    medical_keywords = ["удаление", "имплант", "анестезия", "формирователь", "straumann", "astra", "коронка", "швы", "коллаген", "синус", "лифтинг"]
+    contains_medical_terms = any(kw in raw_lower for kw in medical_keywords)
+    
+    if contains_codes or (contains_medical_terms and len(raw.split()) >= 2):
+        # Это новый запрос на услуги, обрабатываем как коды
+        await state.update_data(candidate_codes=None, raw_text=None)
+        await state.set_state(SessionState.plan_codes)
+        # Рекурсивно вызываем обработчик кодов
+        await handle_plan_codes(message, state)
+        return
+    
     if not candidates:
-        await message.answer("Кандидаты не найдены. Начни ввод кодов заново.")
+        await message.answer("Кандидаты не найдены. Начни ввод кодов заново.", reply_markup=MAIN_KEYBOARD)
         await state.set_state(SessionState.plan_codes)
         return
 
-    indexes = parse_choice_indexes(message.text)
+    # Пытаемся распознать номера из списка
+    indexes = parse_choice_indexes(raw)
     if not indexes:
-        await message.answer("Не понял выбор. Укажи номера через запятую, например 1,2.")
+        await message.answer(
+            "Не понял выбор. Укажи номера через запятую (например: 1,2), "
+            "или напиши 'отмена' для отмены, 'завершить' для финализации плана.",
+            reply_markup=MAIN_KEYBOARD,
+        )
         return
 
     selected: List[str] = []
@@ -1697,7 +2046,7 @@ async def handle_plan_disambiguation(message: Message, state: FSMContext):
             selected.append(candidates[idx]["code"])
 
     if not selected:
-        await message.answer("Ни один номер не распознан. Повтори выбор.")
+        await message.answer("Ни один номер не распознан. Повтори выбор.", reply_markup=MAIN_KEYBOARD)
         return
 
     await state.update_data(candidate_codes=None, raw_text=None)
@@ -1712,10 +2061,19 @@ async def cancel_disambiguation(message: Message, state: FSMContext):
 
 @dp.message(SessionState.plan_confirm, F.text.func(lambda v: v and v.lower() in {"продолжить", "continue"}))
 async def plan_continue(message: Message, state: FSMContext):
-    await message.answer(
-        "Ок, добавим ещё услуги. Напиши коды или опиши словами следующую часть плана.",
-        reply_markup=MAIN_KEYBOARD,
-    )
+    data = await state.get_data()
+    use_stages = data.get("use_stages", False)
+    
+    if use_stages:
+        await message.answer(
+            "Ок, добавим ещё услуги в текущий этап. Напиши коды или опиши словами.",
+            reply_markup=MAIN_KEYBOARD,
+        )
+    else:
+        await message.answer(
+            "Ок, добавим ещё услуги. Напиши коды или опиши словами следующую часть плана.",
+            reply_markup=MAIN_KEYBOARD,
+        )
     await state.set_state(SessionState.plan_codes)
 
 @dp.message(SessionState.plan_confirm)
@@ -1725,14 +2083,57 @@ async def handle_plan_confirm(message: Message, state: FSMContext):
         return
     
     raw = (message.text or "").strip().lower()
+    data = await state.get_data()
+    use_stages = data.get("use_stages", False)
+    plan_stages = data.get("plan_stages", [])
 
     if raw in CONFIRM_WORDS:
         await finalize_current_plan(message, state)
         return
+    
+    # Обработка добавления следующего этапа для многоэтапного плана
+    if use_stages and raw in {"следующий этап", "новый этап", "добавить этап", "этап", "следующий"}:
+        # Создаём новый этап
+        new_stage_index = len(plan_stages)
+        new_stage = {
+            "name": f"Этап {new_stage_index + 1}",
+            "items": [],
+            "codes": [],
+        }
+        plan_stages.append(new_stage)
+        await state.update_data(
+            plan_stages=plan_stages,
+            current_stage_index=new_stage_index,
+        )
+        await message.answer(
+            f"📋 Создаю этап {new_stage_index + 1}.\n"
+            "Укажи название этапа (например: 'Пародонтология и санация', 'Временное протезирование') или начни добавлять услуги.",
+            reply_markup=MAIN_KEYBOARD,
+        )
+        await state.set_state(SessionState.plan_codes)
+        return
 
     if raw in DECLINE_WORDS:
-        await message.answer("🔁 Принято. Надиктуй правки или текст заново.", reply_markup=MAIN_KEYBOARD)
-        await state.set_state(SessionState.intake)
+        # Сохраняем текущий контекст (пациент, карта, план) и переходим к редактированию
+        data = await state.get_data()
+        await message.answer(
+            "🔁 Принято. Напиши коды услуг для добавления/изменения или опиши словами (например: 'удаление сложное, Straumann, формирователь Straumann').",
+            reply_markup=MAIN_KEYBOARD,
+        )
+        # Переходим к редактированию кодов, сохраняя контекст
+        await state.set_state(SessionState.plan_codes)
+        return
+    
+    # Если сообщение похоже на описание услуг (содержит медицинские термины или коды) - обрабатываем как коды
+    medical_keywords = ["удаление", "имплант", "анестезия", "формирователь", "straumann", "astra", "коронка", "швы", "коллаген"]
+    contains_codes = bool(re.search(r'\b\d{6}\b', raw))  # Проверяем наличие 6-значных кодов
+    contains_medical_terms = any(kw in raw.lower() for kw in medical_keywords)
+    
+    if contains_codes or (contains_medical_terms and len(raw.split()) >= 2):
+        # Это описание услуг, обрабатываем как коды
+        await state.set_state(SessionState.plan_codes)
+        # Рекурсивно вызываем обработчик кодов
+        await handle_plan_codes(message, state)
         return
 
     await message.answer(

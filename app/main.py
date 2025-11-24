@@ -59,6 +59,9 @@ class AgentDraftRequest(BaseModel):
     card: str | None = ""
     intake: str = ""
     codes: List[str] = []
+    services: List[Dict[str, Any]] = []  # Подробная информация об услугах (code, name, section, count, price)
+    total: float = 0.0
+    items_count: int = 0
 
 class AgentDraftResponse(BaseModel):
     plan_draft: str
@@ -150,6 +153,9 @@ async def agent_draft(payload: AgentDraftRequest) -> Dict[str, Any]:
         "card": payload.card or "",
         "intake": payload.intake,
         "codes": payload.codes or [],
+        "services": payload.services or [],  # Подробная информация об услугах
+        "total": payload.total,
+        "items_count": payload.items_count,
         "pricing": [],
         "plan_draft": "",
         "comments": payload.intake,
