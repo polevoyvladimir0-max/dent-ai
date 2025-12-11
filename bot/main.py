@@ -179,8 +179,23 @@ async def fetch_plan_summary(codes: List[str]) -> dict:
 
 
 def parse_codes(raw_codes: str) -> List[str]:
+    """
+    Разбирает список кодов. Поддерживает кратность вида `800202*6`
+    (добавит код 6 раз), а также обычные разделители пробел/запятая/точка с запятой.
+    """
     tokens = [token.strip() for token in re.split(r"[\s,;]+", raw_codes) if token.strip()]
-    return [token for token in tokens if token.isdigit()]
+    codes: List[str] = []
+    for token in tokens:
+        # Поддержка формата 123456*3
+        m = re.match(r"^(\d+)\s*\*\s*(\d+)$", token)
+        if m:
+            code, mult = m.group(1), int(m.group(2))
+            if mult > 0:
+                codes.extend([code] * mult)
+            continue
+        if token.isdigit():
+            codes.append(token)
+    return codes
 
 
 def format_doctor_display(doctor: Doctor) -> str:
