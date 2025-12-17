@@ -14,10 +14,14 @@ if not CSV_PATH.exists():
 items = pd.read_csv(CSV_PATH, dtype={"code": str})
 items["section"] = items["section"].fillna("")
 items["display_name"] = items["display_name"].fillna("")
+if "okp_code" not in items.columns:
+    items["okp_code"] = ""
+items["okp_code"] = items["okp_code"].fillna("")
 
 items["text"] = (
     items["display_name"]
     + " | код " + items["code"]
+    + items["okp_code"].map(lambda x: "" if not x else f" | ОКП {x}")
     + " | раздел " + items["section"]
     + items["base_price"].map(lambda x: f" | {x:.2f} RUB")
 )
@@ -37,7 +41,7 @@ client.create_collection(
     vectors_config=models.VectorParams(size=embeddings.shape[1], distance=models.Distance.COSINE),
 )
 
-payloads = items[["code", "display_name", "section", "base_price"]].to_dict("records")
+payloads = items[["code", "display_name", "section", "base_price", "okp_code"]].to_dict("records")
 points = [
     models.PointStruct(id=int(idx), vector=embeddings[idx], payload=payloads[idx])
     for idx in range(len(items))
