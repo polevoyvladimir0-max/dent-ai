@@ -843,6 +843,10 @@ jobs:
           EFFECTIVE_REGISTRY_PASSWORD: ${{ env.EFFECTIVE_REGISTRY_PASSWORD }}
 
           DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
+          VAULT_UNSEAL_STRATEGY: ${{ secrets.VAULT_UNSEAL_STRATEGY }}
+          VAULT_UNSEAL_LOCKBOX_SECRET_ID: ${{ secrets.VAULT_UNSEAL_LOCKBOX_SECRET_ID }}
+          VAULT_UNSEAL_LOCKBOX_ENTRY_PREFIX: ${{ secrets.VAULT_UNSEAL_LOCKBOX_ENTRY_PREFIX }}
+          VAULT_UNSEAL_SA_KEY_FILE: ${{ secrets.VAULT_UNSEAL_SA_KEY_FILE }}
 
         with:
 
@@ -854,7 +858,7 @@ jobs:
 
           command_timeout: 45m
 
-          envs: REGISTRY_URL,REGISTRY_USER,REGISTRY_PASSWORD,EFFECTIVE_REGISTRY_USER,EFFECTIVE_REGISTRY_PASSWORD,DEPLOY_PATH
+          envs: REGISTRY_URL,REGISTRY_USER,REGISTRY_PASSWORD,EFFECTIVE_REGISTRY_USER,EFFECTIVE_REGISTRY_PASSWORD,DEPLOY_PATH,VAULT_UNSEAL_STRATEGY,VAULT_UNSEAL_LOCKBOX_SECRET_ID,VAULT_UNSEAL_LOCKBOX_ENTRY_PREFIX,VAULT_UNSEAL_SA_KEY_FILE
 
           script: |
 
@@ -871,6 +875,21 @@ jobs:
             BACKUP_IMAGE="${REGISTRY}/dent-ai/backup@${{ needs.build-and-push.outputs.backup_digest }}"
 
             cd "$DEPLOY_PATH"
+
+            # Ensure Vault auto-unseal config exists in .env when provided via CI secrets
+            if [ -n "${VAULT_UNSEAL_LOCKBOX_SECRET_ID:-}" ]; then
+              ENV_FILE_PATH="$DEPLOY_PATH/.env"
+              touch "$ENV_FILE_PATH"
+              TMP_ENV="${ENV_FILE_PATH}.tmp"
+              grep -vE '^VAULT_UNSEAL_(STRATEGY|LOCKBOX_SECRET_ID|LOCKBOX_ENTRY_PREFIX|SA_KEY_FILE)=' "$ENV_FILE_PATH" > "$TMP_ENV" || true
+              {
+                echo "VAULT_UNSEAL_STRATEGY=${VAULT_UNSEAL_STRATEGY:-lockbox}"
+                echo "VAULT_UNSEAL_LOCKBOX_SECRET_ID=${VAULT_UNSEAL_LOCKBOX_SECRET_ID}"
+                echo "VAULT_UNSEAL_LOCKBOX_ENTRY_PREFIX=${VAULT_UNSEAL_LOCKBOX_ENTRY_PREFIX:-vault-unseal-key-}"
+                echo "VAULT_UNSEAL_SA_KEY_FILE=${VAULT_UNSEAL_SA_KEY_FILE:-/etc/dent-ai/lockbox-sa-key.json}"
+              } >> "$TMP_ENV"
+              mv "$TMP_ENV" "$ENV_FILE_PATH"
+            fi
 
             LOGIN_USER="$REGISTRY_USER"
 
