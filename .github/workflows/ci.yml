@@ -876,6 +876,19 @@ jobs:
 
             cd "$DEPLOY_PATH"
 
+            # Ensure yc CLI (needed for vault auto-unseal lockbox)
+            if ! command -v yc >/dev/null 2>&1; then
+              echo "yc CLI not found, installing..."
+              curl -sSfL https://storage.yandexcloud.net/yandexcloud-yc/install.sh | bash || true
+              export PATH="$HOME/yandex-cloud/bin:$PATH"
+            fi
+            if ! command -v yc >/dev/null 2>&1; then
+              echo "yc CLI install failed or not in PATH" >&2
+              exit 1
+            fi
+            YC_BIN_PATH=$(command -v yc)
+            export PATH="$PATH"
+
             # Ensure Vault auto-unseal config exists in .env when provided via CI secrets
             if [ -n "${VAULT_UNSEAL_LOCKBOX_SECRET_ID:-}" ]; then
               ENV_FILE_PATH="$DEPLOY_PATH/.env"
@@ -970,7 +983,7 @@ jobs:
             docker compose ps
 
             echo "Running vault auto-unseal..."
-            sudo env "PROJECT_DIR=$DEPLOY_PATH" "ENV_FILE=$DEPLOY_PATH/.env" bash ./infra/scripts/vault-auto-unseal.sh
+            sudo env "PROJECT_DIR=$DEPLOY_PATH" "ENV_FILE=$DEPLOY_PATH/.env" "YC_BIN=$YC_BIN_PATH" bash ./infra/scripts/vault-auto-unseal.sh
 
             HEALTH_URL="http://127.0.0.1:8000/ping"
 
