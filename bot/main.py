@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import List, Optional, Dict, Any
 
 import aiohttp
+import html
 from aiogram import Bot, Dispatcher, F
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
@@ -22,7 +23,11 @@ from aiogram.types import (
     ReplyKeyboardMarkup,
     KeyboardButton,
     BotCommand,
+    InlineKeyboardMarkup,
+    InlineKeyboardButton,
+    CallbackQuery,
 )
+from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from .config import BotConfig
 from .utils.llm import YandexGPTClient
@@ -145,6 +150,10 @@ class SessionState(StatesGroup):
     patient = State()
     card_number = State()
     intake = State()
+    plan_scope = State()  # выбор охвата плана (все зубы / выбрать)
+    tooth_selection = State()  # выбор конкретных зубов
+    plan_category = State()  # выбор категории плана
+    plan_template_selection = State()  # выбор типового плана в категории
     template_selection = State()  # Выбор шаблона плана из истории
     plan_codes = State()
     plan_stage_selection = State()  # Выбор или создание этапа плана лечения
@@ -696,6 +705,12 @@ async def process_codes(message: Message, state: FSMContext, codes: List[str]) -
         await message.answer(f"Не удалось получить план: {exc}. Повтори или измени коды.")
         return
 
+    # Проставляем выбранные зубы в items, если они есть в состоянии
+    selected_teeth = data.get("selected_teeth") or []
+    if selected_teeth:
+        for item in new_plan.get("items", []):
+            item["teeth"] = selected_teeth
+
     session_id = data.get("db_session_id")
     plan_id = data.get("plan_id")
     
@@ -1183,7 +1198,7 @@ def format_agent_feedback(agent_result: Dict[str, Any]) -> str:
     parts = []
     plan_text = agent_result.get("plan")
     if plan_text:
-        parts.append("🤖 Черновик ассистента:\n" + plan_text.strip())
+        parts.append(plan_text.strip())
     validation = agent_result.get("validation") or []
     if validation:
         issues = []
@@ -1196,7 +1211,130 @@ def format_agent_feedback(agent_result: Dict[str, Any]) -> str:
             parts.append("🔍 Проверки:\n" + "\n".join(issues))
     if not parts:
         return "🤖 Ассистент не дал новых рекомендаций."
-    return "\n\n".join(parts)
+    body = "\n\n".join(parts)
+    safe_body = html.escape(body)
+    return "🤖 Черновик ассистента:\n<span class=\"tg-spoiler\">" + safe_body + "</span>"
+
+
+# ---- Вспомогательные клавиатуры и пресеты для выбора зубов/категорий ----
+TEETH_ROWS = [
+    ["1.8", "1.7", "1.6", "1.5", "1.4", "1.3", "1.2", "1.1"],
+    ["2.1", "2.2", "2.3", "2.4", "2.5", "2.6", "2.7", "2.8"],
+    ["4.8", "4.7", "4.6", "4.5", "4.4", "4.3", "4.2", "4.1"],
+    ["3.1", "3.2", "3.3", "3.4", "3.5", "3.6", "3.7", "3.8"],
+]
+
+# Минимальные типовые планы по категориям (используем только известные коды из прайса)
+CATEGORY_PRESETS: Dict[str, Dict[str, Any]] = {
+    "removal": {
+        "title": "Удаление",
+        "templates": [
+            ("Удаление сложное", ["808004", "800202"]),
+            ("Удаление сложное + швы", ["808004", "809000", "800202"]),
+            ("Удаление сложное + швы + повязка", ["808004", "809000", "808009", "800202"]),
+            ("Удаление ретенированного (швы)", ["808004", "809000", "809001", "800202"]),
+        ],
+    },
+    "implant": {
+        "title": "Имплантация",
+        "templates": [
+            ("Имплантация Astra (2 шт)", ["809100", "809100", "809106", "809106", "800202", "800000"]),
+            ("Имплантация Osstem (2 шт)", ["809104", "809104", "809108", "809108", "800202", "800000"]),
+        ],
+    },
+    "therapy": {
+        "title": "Лечение",
+        "templates": [
+            ("Осмотр + КТ", ["202208", "800000"]),
+            ("Повторный осмотр + КТ", ["202209", "800000"]),
+        ],
+    },
+    "prosthetics": {
+        "title": "Протезирование",
+        "templates": [
+            ("Контроль + швы снятие", ["202209", "809001"]),
+        ],
+    },
+    "hygiene": {
+        "title": "Гигиена / общий",
+        "templates": [
+            ("КТ + контроль", ["800000", "202209"]),
+        ],
+    },
+}
+
+
+def build_teeth_keyboard(selected: List[str]) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    selected_set = set(selected)
+    for row in TEETH_ROWS:
+        buttons = [
+            InlineKeyboardButton(
+                text=("✅ " + tooth) if tooth in selected_set else tooth,
+                callback_data=f"tooth:{tooth}",
+            )
+            for tooth in row
+        ]
+        builder.row(*buttons, width=8)
+    builder.row(
+        InlineKeyboardButton(text="Готово", callback_data="tooth:done"),
+        InlineKeyboardButton(text="Сбросить", callback_data="tooth:reset"),
+        width=2,
+    )
+    return builder.as_markup()
+
+
+def build_scope_keyboard() -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    kb.button(text="План для всех зубов", callback_data="scope:all")
+    kb.button(text="Выбрать зубы", callback_data="scope:select")
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+def build_category_keyboard() -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    kb.button(text="Лечение", callback_data="cat:therapy")
+    kb.button(text="Удаление", callback_data="cat:removal")
+    kb.button(text="Имплантация", callback_data="cat:implant")
+    kb.button(text="Пластика", callback_data="cat:plastic")
+    kb.button(text="Протезирование", callback_data="cat:prosthetics")
+    kb.button(text="Гигиена / общий", callback_data="cat:hygiene")
+    kb.button(text="All-on-X", callback_data="cat:allonx")
+    kb.button(text="Ввести коды вручную", callback_data="cat:manual")
+    kb.button(text="Назад к зубам", callback_data="cat:back")
+    kb.adjust(2, 2, 2, 2, 1, 1)
+    return kb.as_markup()
+
+
+def build_templates_keyboard(category: str) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    presets = CATEGORY_PRESETS.get(category, {})
+    for idx, (title, _) in enumerate(presets.get("templates", [])):
+        kb.button(text=title, callback_data=f"tmpl:{category}:{idx}")
+    kb.button(text="Ввести коды вручную", callback_data=f"tmpl:{category}:manual")
+    kb.button(text="Назад к категориям", callback_data="tmpl:back")
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+def build_continue_keyboard() -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    kb.button(text="Продолжить (ещё зубы)", callback_data="flow:continue")
+    kb.button(text="Завершить план", callback_data="flow:finish")
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+async def ask_plan_scope(message: Message, state: FSMContext) -> None:
+    await state.update_data(selected_teeth=[])
+    await message.answer(
+        "План для всех зубов или выбрать конкретные?",
+        reply_markup=build_scope_keyboard(),
+    )
+    await state.set_state(SessionState.plan_scope)
+
+
 
 @dp.message(CommandStart())
 async def cmd_start(message: Message, state: FSMContext):
@@ -1356,6 +1494,17 @@ async def handle_patient(message: Message, state: FSMContext):
     await message.answer("📄 Номер амбулаторной карты?", reply_markup=MAIN_KEYBOARD)
     await state.set_state(SessionState.card_number)
 
+@dp.message(SessionState.patient, F.voice)
+async def handle_patient_voice(message: Message, state: FSMContext):
+    """
+    Голосовой ввод пациента: распознаём, подставляем в текстовый обработчик.
+    """
+    text = await process_voice_message(message, state)
+    if not text:
+        return
+    message.text = text
+    await handle_patient(message, state)
+
 @dp.message(SessionState.card_number)
 async def handle_card(message: Message, state: FSMContext):
     # Проверяем команды
@@ -1474,16 +1623,10 @@ async def handle_voice(message: Message, state: FSMContext):
         await state.set_state(SessionState.template_selection)
         return
     
-    # Если похожих шаблонов нет - спрашиваем про этапы лечения
-    await message.answer(
-        f"🎙 Распознал: {text}\n\n"
-        "📋 План лечения будет многоэтапным? "
-        "Например: первый этап - пародонтология и санация, второй - временное протезирование.\n\n"
-        "Напиши 'да' если нужны этапы, или 'нет' для простого плана.",
-        reply_markup=MAIN_KEYBOARD,
-    )
+    # Если похожих шаблонов нет - предлагаем выбрать зубы/категорию
+    await state.update_data(intake=text)
     await maybe_smalltalk(message, "intake_ack", reply_markup=None, intake=text)
-    await state.set_state(SessionState.plan_stage_selection)
+    await ask_plan_scope(message, state)
 
 
 @dp.message(SessionState.intake)
@@ -1553,15 +1696,10 @@ async def handle_intake(message: Message, state: FSMContext):
         await state.set_state(SessionState.template_selection)
         return
     
-    # Если похожих шаблонов нет - спрашиваем про этапы лечения
-    await message.answer(
-        "📋 План лечения будет многоэтапным? "
-        "Например: первый этап - пародонтология и санация, второй - временное протезирование.\n\n"
-        "Напиши 'да' если нужны этапы, или 'нет' для простого плана.",
-        reply_markup=MAIN_KEYBOARD,
-    )
+    # Если похожих шаблонов нет - предлагаем выбрать зубы/категорию
+    await state.update_data(intake=ideological_plan)
     await maybe_smalltalk(message, "intake_ack", reply_markup=None, intake=ideological_plan)
-    await state.set_state(SessionState.plan_stage_selection)
+    await ask_plan_scope(message, state)
 
 
 # Обработчик голосовых сообщений для plan_stage_selection
@@ -1657,6 +1795,128 @@ async def handle_plan_stage_selection(message: Message, state: FSMContext):
     )
 
 
+# -------- Новый поток: выбор зубов и категорий --------
+@dp.callback_query(F.data.startswith("scope:"))
+async def handle_plan_scope(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    choice = callback.data.split(":", 1)[1]
+    if choice == "all":
+        await state.update_data(selected_teeth=["ALL"])
+        await callback.message.edit_text("Зубы: все. Выбери категорию плана:", reply_markup=build_category_keyboard())
+        await state.set_state(SessionState.plan_category)
+    else:
+        await state.update_data(selected_teeth=[])
+        await callback.message.edit_text(
+            "Выбери зубы (можно несколько), потом нажми «Готово».",
+            reply_markup=build_teeth_keyboard([]),
+        )
+        await state.set_state(SessionState.tooth_selection)
+
+
+@dp.callback_query(F.data.startswith("tooth:"))
+async def handle_tooth_selection(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    action = callback.data.split(":", 1)[1]
+    data = await state.get_data()
+    selected: List[str] = data.get("selected_teeth", [])
+    if action == "done":
+        if not selected:
+            await callback.message.answer("Не выбрал ни одного зуба. Отметь зубы или нажми «План для всех зубов».")
+            return
+        await callback.message.edit_text(
+            f"Зубы: {', '.join(selected)}. Выбери категорию плана:",
+            reply_markup=build_category_keyboard(),
+        )
+        await state.set_state(SessionState.plan_category)
+        return
+    if action == "reset":
+        selected = []
+    else:
+        tooth = action
+        if tooth in selected:
+            selected.remove(tooth)
+        else:
+            selected.append(tooth)
+    await state.update_data(selected_teeth=selected)
+    try:
+        await callback.message.edit_reply_markup(reply_markup=build_teeth_keyboard(selected))
+    except Exception:
+        await callback.message.edit_text(
+            "Выбери зубы (можно несколько), потом нажми «Готово».",
+            reply_markup=build_teeth_keyboard(selected),
+        )
+
+
+@dp.callback_query(F.data.startswith("cat:"))
+async def handle_category(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    cat = callback.data.split(":", 1)[1]
+    if cat == "back":
+        await ask_plan_scope(callback.message, state)
+        return
+    if cat == "manual":
+        await callback.message.answer("Отправь коды вручную (поддерживается формат 800202*2).")
+        await state.set_state(SessionState.plan_codes)
+        return
+    # Для пластики / all-on-x пока нет пресетов — отправляем в ручной ввод
+    if cat not in CATEGORY_PRESETS:
+        await callback.message.answer("Пока нет готовых шаблонов для этой категории. Введи коды вручную.")
+        await state.set_state(SessionState.plan_codes)
+        return
+    await state.update_data(selected_category=cat)
+    presets = CATEGORY_PRESETS[cat]
+    await callback.message.edit_text(
+        f"Категория: {presets['title']}. Выбери типовой план или введи коды вручную.",
+        reply_markup=build_templates_keyboard(cat),
+    )
+    await state.set_state(SessionState.plan_template_selection)
+
+
+@dp.callback_query(F.data.startswith("tmpl:"))
+async def handle_template_choice(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    parts = callback.data.split(":")
+    if len(parts) < 3:
+        return
+    _, cat, idx = parts
+    if idx == "back":
+        await callback.message.edit_text("Выбери категорию плана:", reply_markup=build_category_keyboard())
+        await state.set_state(SessionState.plan_category)
+        return
+    if idx == "manual":
+        await callback.message.answer("Отправь коды вручную (поддерживается формат 800202*2).")
+        await state.set_state(SessionState.plan_codes)
+        return
+    presets = CATEGORY_PRESETS.get(cat, {})
+    templates = presets.get("templates", [])
+    try:
+        idx_int = int(idx)
+        title, codes = templates[idx_int]
+    except Exception:
+        await callback.message.answer("Не смог выбрать шаблон. Введи коды вручную.")
+        await state.set_state(SessionState.plan_codes)
+        return
+
+    await callback.message.answer(f"Применяю план «{title}»...\nКоды: {', '.join(codes)}")
+    await process_codes(callback.message, state, codes)
+    await callback.message.answer(
+        "Продолжить выбор зубов или завершить план?",
+        reply_markup=build_continue_keyboard(),
+    )
+    await state.set_state(SessionState.plan_confirm)
+
+
+@dp.callback_query(F.data.startswith("flow:"))
+async def handle_flow_control(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    action = callback.data.split(":", 1)[1]
+    if action == "continue":
+        await state.update_data(selected_teeth=[])
+        await ask_plan_scope(callback.message, state)
+    else:
+        await callback.message.answer("Ок, можно завершать план. Напиши 'завершить' или подтверди как обычно.")
+        await state.set_state(SessionState.plan_confirm)
+
 # Обработчик голосовых сообщений для template_selection
 @dp.message(SessionState.template_selection, F.voice)
 async def handle_voice_template_selection(message: Message, state: FSMContext):
@@ -1697,11 +1957,8 @@ async def handle_template_selection(message: Message, state: FSMContext):
     # Если пользователь хочет создать новый план
     if user_input in {"новый", "new", "создать", "create"}:
         await state.update_data(similar_templates=None)
-        await message.answer(
-            "Создаю новый план. Отправь коды услуг или опиши словами (например: 'имплантат Straumann').",
-            reply_markup=MAIN_KEYBOARD,
-        )
-        await state.set_state(SessionState.plan_codes)
+        await message.answer("Создаю новый план. Сначала выберем зубы или укажем, что план для всех.")
+        await ask_plan_scope(message, state)
         return
     
     # Пытаемся распознать номер шаблона
