@@ -952,8 +952,7 @@ async def finalize_current_plan(message: Message, state: FSMContext) -> None:
         try:
             # Извлекаем последовательность кодов из плана (в порядке добавления)
             plan_items = plan.get("items", [])
-            
-codes_sequence: List[str] = []
+            codes_sequence: List[str] = []
             for item in plan_items:
                 code = item.get("code")
                 if not code:
