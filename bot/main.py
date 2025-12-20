@@ -159,6 +159,8 @@ class SessionState(StatesGroup):
     plan_stage_selection = State()  # Выбор или создание этапа плана лечения
     plan_disambiguation = State()
     plan_confirm = State()
+    plan_edit_select = State()  # выбор услуги для редактирования
+    plan_edit_replace = State()  # ввод заменяющих кодов
     plan_feedback_rating = State()
     plan_feedback_comment = State()
 
@@ -173,6 +175,22 @@ def parse_choice_indexes(raw: str) -> List[int]:
                 indexes.append(idx)
     return indexes
 
+
+
+
+def build_edit_plan_keyboard(plan_items: List[Dict[str, Any]]) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    for idx, item in enumerate(plan_items):
+        code = item.get("code", "??????")
+        count = item.get("count", 1) or 1
+        teeth = item.get("teeth") or []
+        teeth_suffix = f" ({','.join(teeth)})" if teeth else ""
+        builder.button(
+            text=f"{code} × {count}{teeth_suffix}",
+            callback_data=f"edit_item:{idx}",
+        )
+    builder.adjust(1)
+    return builder.as_markup()
 
 async def fetch_plan_summary(codes: List[str]) -> dict:
     payload = {"codes": codes}
@@ -855,6 +873,10 @@ async def process_codes(message: Message, state: FSMContext, codes: List[str]) -
             "Продолжить добавление услуг или завершить план? Напиши 'продолжить' или 'завершить'.",
             reply_markup=MAIN_KEYBOARD,
         )
+        edit_markup = InlineKeyboardMarkup(
+            inline_keyboard=[[InlineKeyboardButton(text="✏️ Исправить услуги", callback_data="plan_edit_start")]]
+        )
+        await message.answer("Нужно поправить коды или кратность?", reply_markup=edit_markup)
     await state.set_state(SessionState.plan_confirm)
 
 
@@ -930,7 +952,16 @@ async def finalize_current_plan(message: Message, state: FSMContext) -> None:
         try:
             # Извлекаем последовательность кодов из плана (в порядке добавления)
             plan_items = plan.get("items", [])
-            codes_sequence = [item.get("code") for item in plan_items if item.get("code")]
+            
+codes_sequence: List[str] = []
+            for item in plan_items:
+                code = item.get("code")
+                if not code:
+                    continue
+                cnt = int(item.get("count") or 1)
+                cnt = cnt if cnt > 0 else 1
+                codes_sequence.extend([code] * cnt)
+
             
             if codes_sequence:
                 with get_db() as db:
@@ -2412,6 +2443,149 @@ async def handle_plan_confirm(message: Message, state: FSMContext):
         "Не понял. Напиши 'продолжить' для добавления услуг, 'завершить' или 'да' для финализации, либо 'нет' чтобы внести правки.",
         reply_markup=MAIN_KEYBOARD,
     )
+
+
+
+@dp.callback_query(F.data == "plan_edit_start")
+async def handle_plan_edit_start(callback: CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    use_stages = data.get("use_stages", False)
+    plan = data.get("plan")
+    if use_stages:
+        await callback.answer("Правки для этапов пока не поддержаны", show_alert=True)
+        return
+    if not plan or not plan.get("items"):
+        await callback.answer("План пуст. Добавь коды", show_alert=True)
+        return
+    await callback.answer()
+    await callback.message.answer(
+        "Выбери услугу, которую нужно заменить. Введи новые коды с кратностью (например 800202*2 800203).",
+        reply_markup=build_edit_plan_keyboard(plan.get("items", [])),
+    )
+    await state.set_state(SessionState.plan_edit_select)
+
+
+@dp.callback_query(F.data.startswith("edit_item:"))
+async def handle_plan_edit_item(callback: CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    plan = data.get("plan") or {}
+    items = plan.get("items") or []
+    try:
+        idx = int(callback.data.split(":", 1)[1])
+    except Exception:
+        await callback.answer("Не понял выбор", show_alert=True)
+        return
+    if idx < 0 or idx >= len(items):
+        await callback.answer("Нет такого пункта", show_alert=True)
+        return
+    item = items[idx]
+    code = item.get("code", "")
+    count = item.get("count", 1) or 1
+    teeth = item.get("teeth") or []
+    teeth_info = f" на зубы {','.join(teeth)}" if teeth else ""
+    await callback.answer()
+    await state.update_data(edit_item_index=idx, edit_item_code=code, edit_item_count=count)
+    await callback.message.answer(
+        f"Замена для {code} × {count}{teeth_info}.
+"
+        "Введи новые коды (поддержка кратности: 800202*3 800203). Напиши 'отмена' чтобы выйти.",
+        reply_markup=MAIN_KEYBOARD,
+    )
+    await state.set_state(SessionState.plan_edit_replace)
+
+
+@dp.message(SessionState.plan_edit_replace, F.text.func(lambda v: v and v.lower() in {"отмена", "cancel"}))
+async def handle_plan_edit_cancel(message: Message, state: FSMContext):
+    await state.update_data(edit_item_index=None, edit_item_code=None, edit_item_count=None)
+    await message.answer("Отменил правки. Можешь продолжить работу с планом.", reply_markup=MAIN_KEYBOARD)
+    await state.set_state(SessionState.plan_confirm)
+
+
+@dp.message(SessionState.plan_edit_replace)
+async def handle_plan_edit_replace(message: Message, state: FSMContext):
+    raw = (message.text or "").strip()
+    if not raw:
+        await message.answer("Пусто. Введи новые коды или напиши 'отмена'.", reply_markup=MAIN_KEYBOARD)
+        return
+    replacements = parse_codes(raw)
+    if not replacements:
+        await message.answer("Не распознал коды. Пример: 800202*2 809000", reply_markup=MAIN_KEYBOARD)
+        return
+
+    data = await state.get_data()
+    use_stages = data.get("use_stages", False)
+    if use_stages:
+        await message.answer("Пока редактирование многоэтапных планов не поддержано.", reply_markup=MAIN_KEYBOARD)
+        await state.set_state(SessionState.plan_confirm)
+        return
+
+    codes = data.get("codes", []) or []
+    item_code = data.get("edit_item_code")
+    item_count = int(data.get("edit_item_count") or 1)
+    if not item_code:
+        await message.answer("Не смог найти выбранный пункт. Начни заново.", reply_markup=MAIN_KEYBOARD)
+        await state.set_state(SessionState.plan_confirm)
+        return
+
+    new_codes = list(codes)
+    try:
+        start_idx = new_codes.index(item_code)
+    except ValueError:
+        start_idx = len(new_codes)
+    removed = 0
+    i = start_idx
+    while i < len(new_codes) and removed < item_count:
+        if new_codes[i] == item_code:
+            new_codes.pop(i)
+            removed += 1
+            continue
+        i += 1
+    for offset, code in enumerate(replacements):
+        new_codes.insert(start_idx + offset, code)
+
+    await message.answer("Пересчитываю план после правки...", reply_markup=MAIN_KEYBOARD)
+    try:
+        new_plan = await fetch_plan_summary(new_codes)
+    except Exception as exc:
+        import logging
+        logging.exception("Recalculate after edit failed")
+        await message.answer(f"Не удалось пересчитать план: {exc}. Попробуй другие коды.", reply_markup=MAIN_KEYBOARD)
+        return
+
+    selected_teeth = data.get("selected_teeth") or []
+    if selected_teeth:
+        for item in new_plan.get("items", []):
+            item["teeth"] = selected_teeth
+
+    combined_plan = combine_plans({"items": [], "total": 0}, new_plan, new_codes)
+
+    session_id = data.get("db_session_id")
+    plan_id = data.get("plan_id")
+    with get_db() as db:
+        session_record = db.get(DBSession, session_id) if session_id else None
+        if session_record:
+            session_record.codes = " ".join(new_codes)
+            session_record.transcript = data.get("intake", "")
+        plan_record = db.get(TreatmentPlan, plan_id) if plan_id else None
+        if plan_record:
+            plan_record.plan_json = combined_plan
+            plan_record.status = "draft"
+        db.commit()
+
+    summary = format_plan(combined_plan)
+    await state.update_data(
+        plan=combined_plan,
+        codes=new_codes,
+        edit_item_index=None,
+        edit_item_code=None,
+        edit_item_count=None,
+    )
+    edit_markup = InlineKeyboardMarkup(
+        inline_keyboard=[[InlineKeyboardButton(text="✏️ Исправить ещё", callback_data="plan_edit_start")]]
+    )
+    await message.answer(summary, reply_markup=MAIN_KEYBOARD)
+    await message.answer("Готово. Можно править дальше или завершить план.", reply_markup=edit_markup)
+    await state.set_state(SessionState.plan_confirm)
 
 @dp.message(F.text.lower() == "оценить план")
 async def start_feedback(message: Message, state: FSMContext):
