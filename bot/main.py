@@ -2485,13 +2485,11 @@ async def handle_plan_edit_item(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
     await state.update_data(edit_item_index=idx, edit_item_code=code, edit_item_count=count)
     await callback.message.answer(
-        f"Замена для {code} × {count}{teeth_info}.
-"
+        f"Замена для {code} × {count}{teeth_info}.\n"
         "Введи новые коды (поддержка кратности: 800202*3 800203). Напиши 'отмена' чтобы выйти.",
         reply_markup=MAIN_KEYBOARD,
     )
     await state.set_state(SessionState.plan_edit_replace)
-
 
 @dp.message(SessionState.plan_edit_replace, F.text.func(lambda v: v and v.lower() in {"отмена", "cancel"}))
 async def handle_plan_edit_cancel(message: Message, state: FSMContext):
