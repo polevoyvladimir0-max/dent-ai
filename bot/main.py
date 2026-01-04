@@ -1287,6 +1287,46 @@ def build_scope_keyboard() -> InlineKeyboardMarkup:
     return kb.as_markup()
 
 
+def find_patients_by_name_part(name: str, limit: int = 5) -> list[Patient]:
+    tokens = (name or "").strip().split()
+    if not tokens:
+        return []
+    surname = tokens[0]
+    pattern = f"%{surname}%"
+    with get_db() as db:
+        return (
+            db.query(Patient)
+            .filter(Patient.name.ilike(pattern))
+            .order_by(Patient.created_at.desc())
+            .limit(limit)
+            .all()
+        )
+
+
+
+def find_patients_by_card(card_number: str, limit: int = 5) -> list[Patient]:
+    if not card_number:
+        return []
+    pattern = f"%{card_number}%"
+    with get_db() as db:
+        return (
+            db.query(Patient)
+            .filter(Patient.card_number.ilike(pattern))
+            .order_by(Patient.created_at.desc())
+            .limit(limit)
+            .all()
+        )
+
+
+
+def build_patient_suggestions(patients: list[Patient], kind: str = "patient_pick") -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    for patient in patients:
+        title = f"{patient.name} ({patient.card_number or 'без карты'})"
+        kb.button(text=shorten_text(title, 60), callback_data=f"{kind}:{patient.id}")
+    return kb.adjust(1).as_markup()
+
+
 def build_category_keyboard() -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
     kb.button(text="Лечение", callback_data="cat:therapy")
