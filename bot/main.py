@@ -811,45 +811,7 @@ async def process_codes(message: Message, state: FSMContext, codes: List[str]) -
     summary = format_plan(combined_plan)
     await state.update_data(plan=combined_plan, codes=all_codes, db_session_id=session_id, plan_id=plan_id)
 
-    # Формируем подробный payload для agent draft с названиями услуг
-    plan_items = combined_plan.get("items", [])
-    codes_with_names = [
-        {
-            "code": item.get("code", ""),
-            "name": item.get("display_name", ""),
-            "section": item.get("section", ""),
-            "count": item.get("count", 1),
-            "price": item.get("base_price", 0),
-        }
-        for item in plan_items
-    ]
-    
-    agent_payload = {
-        "doctor": data.get("doctor_full_display") or data.get("doctor") or "",
-        "patient": data.get("patient", ""),
-        "card": data.get("card", ""),
-        "intake": data.get("intake", ""),
-        "codes": all_codes,
-        "services": codes_with_names,  # Добавляем подробную информацию об услугах
-        "total": combined_plan.get("total", 0),
-        "items_count": len(plan_items),
-    }
-    agent_result = await call_agent_draft(agent_payload)
-    if agent_result:
-        with get_db() as db:
-            plan_record = db.get(TreatmentPlan, plan_id) if plan_id else None
-            if plan_record:
-                plan_record.agent_plan = agent_result.get("plan")
-                plan_record.agent_validation = agent_result.get("validation")
-                db.commit()
-        await state.update_data(agent_result=agent_result)
-        agent_text = format_agent_feedback(agent_result)
-    else:
-        await state.update_data(agent_result=None)
-        agent_text = "🤖 Ассистент недоступен."
-
     await message.answer(summary, reply_markup=MAIN_KEYBOARD)
-    await message.answer(agent_text)
     await maybe_smalltalk(
         message,
         "plan_summary",
@@ -908,6 +870,11 @@ async def finalize_current_plan(message: Message, state: FSMContext) -> None:
     card = data.get("card", "-")
     doctor_display = data.get("doctor_full_display") or data.get("doctor") or "Врач"
     doctor_plain = data.get("doctor") or doctor_display
+
+    summary_text = await build_plan_annotation(data)
+    if summary_text:
+        plan["summary_text"] = summary_text
+        await state.update_data(plan=plan)
 
     pdf_path = generate_pdf(
         plan,
@@ -1248,10 +1215,8 @@ def format_agent_feedback(agent_result: Dict[str, Any]) -> str:
 
 # ---- Вспомогательные клавиатуры и пресеты для выбора зубов/категорий ----
 TEETH_ROWS = [
-    ["1.8", "1.7", "1.6", "1.5", "1.4", "1.3", "1.2", "1.1"],
-    ["2.1", "2.2", "2.3", "2.4", "2.5", "2.6", "2.7", "2.8"],
-    ["4.8", "4.7", "4.6", "4.5", "4.4", "4.3", "4.2", "4.1"],
-    ["3.1", "3.2", "3.3", "3.4", "3.5", "3.6", "3.7", "3.8"],
+    ["1.8", "1.7", "1.6", "1.5", "1.4", "1.3", "1.2", "1.1", "2.1", "2.2", "2.3", "2.4", "2.5", "2.6", "2.7", "2.8"],
+    ["4.8", "4.7", "4.6", "4.5", "4.4", "4.3", "4.2", "4.1", "3.1", "3.2", "3.3", "3.4", "3.5", "3.6", "3.7", "3.8"],
 ]
 
 # Минимальные типовые планы по категориям (используем только известные коды из прайса)
@@ -1305,7 +1270,7 @@ def build_teeth_keyboard(selected: List[str]) -> InlineKeyboardMarkup:
             )
             for tooth in row
         ]
-        builder.row(*buttons, width=8)
+        builder.row(*buttons, width=16)
     builder.row(
         InlineKeyboardButton(text="Готово", callback_data="tooth:done"),
         InlineKeyboardButton(text="Сбросить", callback_data="tooth:reset"),
@@ -1521,6 +1486,9 @@ async def handle_patient(message: Message, state: FSMContext):
     
     patient_name = message.text.strip()
     await state.update_data(patient=patient_name)
+    suggestions = find_patients_by_name_part(patient_name)
+    if suggestions:
+        await message.answer("Нашёл похожих пациентов. Выбери при необходимости:", reply_markup=build_patient_suggestions(suggestions, "patient_pick"))
     await message.answer("📄 Номер амбулаторной карты?", reply_markup=MAIN_KEYBOARD)
     await state.set_state(SessionState.card_number)
 
@@ -1535,6 +1503,54 @@ async def handle_patient_voice(message: Message, state: FSMContext):
     message.text = text
     await handle_patient(message, state)
 
+@dp.callback_query(F.data.startswith("patient_pick:"))
+async def handle_patient_pick(callback: CallbackQuery, state: FSMContext):
+    try:
+        patient_id = int(callback.data.split(":", 1)[1])
+    except Exception:
+        await callback.answer("Не понял выбор", show_alert=True)
+        return
+    with get_db() as db:
+        patient = db.get(Patient, patient_id)
+    if not patient:
+        await callback.answer("Пациент не найден", show_alert=True)
+        return
+    await callback.answer()
+    await state.update_data(patient=patient.name, patient_id=patient.id, card=patient.card_number)
+    if patient.card_number:
+        await state.set_state(SessionState.intake)
+        await callback.message.answer(
+            f"Использую {patient.name} (карта {patient.card_number}). 🎙 Надиктуй план лечения (голос или текст).",
+            reply_markup=MAIN_KEYBOARD,
+        )
+    else:
+        await state.set_state(SessionState.card_number)
+        await callback.message.answer(
+            f"Использую {patient.name}. 📄 Номер амбулаторной карты?",
+            reply_markup=MAIN_KEYBOARD,
+        )
+
+
+@dp.callback_query(F.data.startswith("card_pick:"))
+async def handle_card_pick(callback: CallbackQuery, state: FSMContext):
+    try:
+        patient_id = int(callback.data.split(":", 1)[1])
+    except Exception:
+        await callback.answer("Не понял выбор", show_alert=True)
+        return
+    with get_db() as db:
+        patient = db.get(Patient, patient_id)
+    if not patient:
+        await callback.answer("Пациент не найден", show_alert=True)
+        return
+    await callback.answer()
+    await state.update_data(patient=patient.name, patient_id=patient.id, card=patient.card_number)
+    await state.set_state(SessionState.intake)
+    await callback.message.answer(
+        f"Использую {patient.name} (карта {patient.card_number or 'не указана'}). 🎙 Надиктуй план лечения (голос или текст).",
+        reply_markup=MAIN_KEYBOARD,
+    )
+
 @dp.message(SessionState.card_number)
 async def handle_card(message: Message, state: FSMContext):
     # Проверяем команды
@@ -1544,14 +1560,30 @@ async def handle_card(message: Message, state: FSMContext):
     card_number = message.text.strip()
     data = await state.get_data()
     patient_name = data.get("patient", "")
+    matches = find_patients_by_card(card_number)
+    if matches:
+        await state.update_data(card=card_number)
+        await message.answer(
+            "Похоже, такая карта уже есть. Выбери пациента или введи другую:",
+            reply_markup=build_patient_suggestions(matches, "card_pick"),
+        )
+        return
     with get_db() as db:
-        patient = db.query(Patient).filter_by(name=patient_name, card_number=card_number).one_or_none()
+        patient: Optional[Patient] = None
+        if data.get("patient_id"):
+            patient = db.get(Patient, data["patient_id"])
+        if patient is None:
+            patient = db.query(Patient).filter_by(name=patient_name, card_number=card_number).one_or_none()
         if patient is None:
             patient = Patient(name=patient_name, card_number=card_number)
             db.add(patient)
             db.commit()
+        else:
+            if not patient.card_number:
+                patient.card_number = card_number
+                db.commit()
         patient_id = patient.id
-    await state.update_data(card=card_number, patient_id=patient_id)
+    await state.update_data(card=card_number, patient_id=patient_id, patient=patient.name)
     await message.answer("🎙 Надиктуй план лечения (голос или текст).", reply_markup=MAIN_KEYBOARD)
     await state.set_state(SessionState.intake)
 
