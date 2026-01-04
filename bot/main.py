@@ -1270,7 +1270,7 @@ def build_teeth_keyboard(selected: List[str]) -> InlineKeyboardMarkup:
             )
             for tooth in row
         ]
-        builder.row(*buttons, width=16)
+        builder.row(*buttons, width=8)
     builder.row(
         InlineKeyboardButton(text="Готово", callback_data="tooth:done"),
         InlineKeyboardButton(text="Сбросить", callback_data="tooth:reset"),
