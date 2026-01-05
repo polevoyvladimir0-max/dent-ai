@@ -101,6 +101,7 @@ def generate_pdf(plan: Dict, doctor: str, patient: str, card: str, full_doctor_t
 
     items: List[Dict] = plan.get("items", [])
     total: float = float(plan.get("total", 0.0))
+    summary_text: str | None = plan.get("summary_text")
 
     filename = f"plan_{patient.replace(' ', '_')}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf"
     output_path = STORAGE_DIR / filename
@@ -128,6 +129,10 @@ def generate_pdf(plan: Dict, doctor: str, patient: str, card: str, full_doctor_t
     elements.append(Paragraph(f"<b>Пациент:</b> {patient}", body_style))
     elements.append(Paragraph(f"<b>Номер карты:</b> {card}", body_style))
     elements.append(Paragraph(f"<b>Дата:</b> {datetime.now().strftime('%d.%m.%Y %H:%M')}", body_style))
+    elements.append(Spacer(1, 12))
+
+    if summary_text:
+        elements.append(Paragraph(summary_text, body_style))
     elements.append(Spacer(1, 12))
 
     def cell(text: str) -> Paragraph:

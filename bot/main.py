@@ -1213,6 +1213,64 @@ def format_agent_feedback(agent_result: Dict[str, Any]) -> str:
     return "🤖 Черновик ассистента:\n<span class=\"tg-spoiler\">" + safe_body + "</span>"
 
 
+async def build_plan_annotation(state_data: Dict[str, Any]) -> Optional[str]:
+    """
+    Короткая аннотация для PDF: 2–3 предложения (LLM если доступен; иначе fallback).
+    """
+    plan = state_data.get("plan") or {}
+    items = plan.get("items") or []
+    if not items:
+        return None
+
+    intake = (state_data.get("intake") or "").strip()
+    doctor = state_data.get("doctor_full_display") or state_data.get("doctor") or ""
+    patient = state_data.get("patient") or ""
+    teeth = sorted({t for item in items for t in (item.get("teeth") or [])})
+
+    services_desc: List[str] = []
+    for item in items:
+        name = item.get("display_name") or item.get("code") or ""
+        code = item.get("code") or ""
+        count = int(item.get("count") or 1)
+        services_desc.append(f"{name} (код {code}, ×{count})")
+    services_text = ", ".join(services_desc)
+
+    if LLM_CLIENT and LLM_ENABLED:
+        system_prompt = (
+            "Ты стоматологический ассистент. Сформируй краткое (2-3 предложения) описание плана лечения "
+            "для печатной формы. Укажи ключевую идею плана/жалобы, упомяни задействованные зубы, "
+            "отметь важные нюансы/риски. Не пиши приветствий, подписи и маркированные списки."
+        )
+        user_prompt_parts = [
+            f"Пациент: {patient}" if patient else "",
+            f"Врач: {doctor}" if doctor else "",
+            f"Диктовка: {intake}" if intake else "",
+            f"Зубы: {', '.join(teeth)}" if teeth else "Зубы не указаны",
+            f"Услуги: {services_text}",
+        ]
+        user_prompt = "\n".join([p for p in user_prompt_parts if p])
+        try:
+            text = await LLM_CLIENT.generate(
+                [
+                    {"role": "system", "text": system_prompt},
+                    {"role": "user", "text": user_prompt},
+                ],
+                temperature=0.35,
+                max_tokens=260,
+            )
+            if text:
+                return shorten_text(text, 600)
+        except Exception as llm_exc:
+            logging.warning("LLM summary failed: %s", llm_exc)
+
+    fallback_parts: List[str] = []
+    if intake:
+        fallback_parts.append(shorten_text(intake, 280))
+    if services_text:
+        fallback_parts.append("Услуги: " + shorten_text(services_text, 300))
+    return "\n".join(fallback_parts) if fallback_parts else None
+
+
 # ---- Вспомогательные клавиатуры и пресеты для выбора зубов/категорий ----
 TEETH_ROWS = [
     ["1.8", "1.7", "1.6", "1.5", "1.4", "1.3", "1.2", "1.1", "2.1", "2.2", "2.3", "2.4", "2.5", "2.6", "2.7", "2.8"],
