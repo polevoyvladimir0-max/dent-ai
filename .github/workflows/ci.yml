@@ -1,8 +1,10 @@
-name: CI
+﻿name: CI
 
 
 
 on:
+
+  workflow_dispatch:
 
   push:
 
@@ -148,7 +150,7 @@ jobs:
 
         run: |
 
-          # Используем конкретную версию вместо latest для надёжности
+          # РСЃРїРѕР»СЊР·СѓРµРј РєРѕРЅРєСЂРµС‚РЅСѓСЋ РІРµСЂСЃРёСЋ РІРјРµСЃС‚Рѕ latest РґР»СЏ РЅР°РґС‘Р¶РЅРѕСЃС‚Рё
 
           GRYPE_VERSION="v0.80.0"
 
@@ -156,7 +158,7 @@ jobs:
 
             echo "Failed to install grype from script, trying direct download..."
 
-            # Альтернативный метод: скачиваем бинарник напрямую
+            # РђР»СЊС‚РµСЂРЅР°С‚РёРІРЅС‹Р№ РјРµС‚РѕРґ: СЃРєР°С‡РёРІР°РµРј Р±РёРЅР°СЂРЅРёРє РЅР°РїСЂСЏРјСѓСЋ
 
             curl -sSfL "https://github.com/anchore/grype/releases/download/${GRYPE_VERSION}/grype_${GRYPE_VERSION#v}_linux_amd64.tar.gz" -o /tmp/grype.tar.gz || {
 
@@ -947,24 +949,24 @@ jobs:
             echo "Waiting for containers to start..."
             sleep 5
 
-            # Удаляем остановленные контейнеры перед unseal
+            # РЈРґР°Р»СЏРµРј РѕСЃС‚Р°РЅРѕРІР»РµРЅРЅС‹Рµ РєРѕРЅС‚РµР№РЅРµСЂС‹ РїРµСЂРµРґ unseal
             stopped=$(docker compose ps --filter "status=exited" -q || true)
             if [ -n "$stopped" ]; then
               echo "$stopped" | xargs docker rm -f || true
             fi
 
-            # Сразу удаляем образы с <none> тегами (они создаются при пересоздании контейнеров)
+            # РЎСЂР°Р·Сѓ СѓРґР°Р»СЏРµРј РѕР±СЂР°Р·С‹ СЃ <none> С‚РµРіР°РјРё (РѕРЅРё СЃРѕР·РґР°СЋС‚СЃСЏ РїСЂРё РїРµСЂРµСЃРѕР·РґР°РЅРёРё РєРѕРЅС‚РµР№РЅРµСЂРѕРІ)
             echo "Removing dangling images with <none> tags..."
-            # Получаем ID всех образов, используемых в работающих контейнерах
+            # РџРѕР»СѓС‡Р°РµРј ID РІСЃРµС… РѕР±СЂР°Р·РѕРІ, РёСЃРїРѕР»СЊР·СѓРµРјС‹С… РІ СЂР°Р±РѕС‚Р°СЋС‰РёС… РєРѕРЅС‚РµР№РЅРµСЂР°С…
             used_image_ids=$(docker ps --format "{{.ID}}" | xargs -I {} docker inspect -f '{{.Image}}' {} 2>/dev/null | sort -u || true)
             
             for image_name in app bot base backup; do
-              # Получаем ID образов с <none> тегами
+              # РџРѕР»СѓС‡Р°РµРј ID РѕР±СЂР°Р·РѕРІ СЃ <none> С‚РµРіР°РјРё
               none_images=$(docker images "${REGISTRY}/dent-ai/${image_name}" --format "{{.ID}}\t{{.Tag}}" --filter "dangling=false" | \
                 awk -F'\t' '$2 == "<none>" {print $1}' || true)
               if [ -n "$none_images" ]; then
                 for img_id in $none_images; do
-                  # Проверяем, что образ не используется в работающих контейнерах
+                  # РџСЂРѕРІРµСЂСЏРµРј, С‡С‚Рѕ РѕР±СЂР°Р· РЅРµ РёСЃРїРѕР»СЊР·СѓРµС‚СЃСЏ РІ СЂР°Р±РѕС‚Р°СЋС‰РёС… РєРѕРЅС‚РµР№РЅРµСЂР°С…
                   img_full_id=$(docker inspect -f '{{.Id}}' "$img_id" 2>/dev/null || echo "")
                   if [ -z "$img_full_id" ]; then
                     continue
@@ -1031,38 +1033,38 @@ jobs:
 
             fi
 
-            # Очистка неиспользуемых Docker ресурсов
+            # РћС‡РёСЃС‚РєР° РЅРµРёСЃРїРѕР»СЊР·СѓРµРјС‹С… Docker СЂРµСЃСѓСЂСЃРѕРІ
             echo "Cleaning up unused Docker resources..."
-            # Удаляем остановленные контейнеры старше 24 часов
+            # РЈРґР°Р»СЏРµРј РѕСЃС‚Р°РЅРѕРІР»РµРЅРЅС‹Рµ РєРѕРЅС‚РµР№РЅРµСЂС‹ СЃС‚Р°СЂС€Рµ 24 С‡Р°СЃРѕРІ
             docker container prune -f --filter "until=24h" || true
-            # Удаляем неиспользуемые образы старше 7 дней
+            # РЈРґР°Р»СЏРµРј РЅРµРёСЃРїРѕР»СЊР·СѓРµРјС‹Рµ РѕР±СЂР°Р·С‹ СЃС‚Р°СЂС€Рµ 7 РґРЅРµР№
             docker image prune -af --filter "until=168h" || true
-            # Удаляем старые версии образов dent-ai/* (оставляем последние 5 SHA)
+            # РЈРґР°Р»СЏРµРј СЃС‚Р°СЂС‹Рµ РІРµСЂСЃРёРё РѕР±СЂР°Р·РѕРІ dent-ai/* (РѕСЃС‚Р°РІР»СЏРµРј РїРѕСЃР»РµРґРЅРёРµ 5 SHA)
             echo "Cleaning up old image versions..."
             for image_name in app bot base backup; do
               echo "Checking ${image_name} images..."
-              # Получаем все образы (включая <none> теги), отсортированные по дате создания
-              # Используем формат: ID,Tag,CreatedAt для более надёжной сортировки
+              # РџРѕР»СѓС‡Р°РµРј РІСЃРµ РѕР±СЂР°Р·С‹ (РІРєР»СЋС‡Р°СЏ <none> С‚РµРіРё), РѕС‚СЃРѕСЂС‚РёСЂРѕРІР°РЅРЅС‹Рµ РїРѕ РґР°С‚Рµ СЃРѕР·РґР°РЅРёСЏ
+              # РСЃРїРѕР»СЊР·СѓРµРј С„РѕСЂРјР°С‚: ID,Tag,CreatedAt РґР»СЏ Р±РѕР»РµРµ РЅР°РґС‘Р¶РЅРѕР№ СЃРѕСЂС‚РёСЂРѕРІРєРё
               all_images=$(docker images "${REGISTRY}/dent-ai/${image_name}" --format "{{.ID}}\t{{.Tag}}\t{{.CreatedAt}}" --filter "dangling=false" | \
                 sort -k3 -r || true)
               if [ -z "$all_images" ]; then
                 echo "No ${image_name} images found"
                 continue
               fi
-              # Подсчитываем количество образов
+              # РџРѕРґСЃС‡РёС‚С‹РІР°РµРј РєРѕР»РёС‡РµСЃС‚РІРѕ РѕР±СЂР°Р·РѕРІ
               image_count=$(echo "$all_images" | wc -l)
               echo "Found $image_count ${image_name} image(s)"
               
-              # Получаем ID образов, которые используются в работающих контейнерах
+              # РџРѕР»СѓС‡Р°РµРј ID РѕР±СЂР°Р·РѕРІ, РєРѕС‚РѕСЂС‹Рµ РёСЃРїРѕР»СЊР·СѓСЋС‚СЃСЏ РІ СЂР°Р±РѕС‚Р°СЋС‰РёС… РєРѕРЅС‚РµР№РЅРµСЂР°С…
               used_ids=$(docker ps --format "{{.Image}}" | xargs -I {} docker inspect -f '{{.Id}}' {} 2>/dev/null | sort -u || true)
               
-              # Удаляем образы с тегом <none> (они создаются при пересоздании контейнеров)
+              # РЈРґР°Р»СЏРµРј РѕР±СЂР°Р·С‹ СЃ С‚РµРіРѕРј <none> (РѕРЅРё СЃРѕР·РґР°СЋС‚СЃСЏ РїСЂРё РїРµСЂРµСЃРѕР·РґР°РЅРёРё РєРѕРЅС‚РµР№РЅРµСЂРѕРІ)
               echo "Removing images with <none> tags..."
               none_images=$(docker images "${REGISTRY}/dent-ai/${image_name}" --format "{{.ID}}\t{{.Tag}}" --filter "dangling=false" | \
                 awk -F'\t' '$2 == "<none>" {print $1}' || true)
               if [ -n "$none_images" ]; then
                 for img_id in $none_images; do
-                  # Проверяем, используется ли этот образ в работающих контейнерах
+                  # РџСЂРѕРІРµСЂСЏРµРј, РёСЃРїРѕР»СЊР·СѓРµС‚СЃСЏ Р»Рё СЌС‚РѕС‚ РѕР±СЂР°Р· РІ СЂР°Р±РѕС‚Р°СЋС‰РёС… РєРѕРЅС‚РµР№РЅРµСЂР°С…
                   img_inspect=$(docker inspect -f '{{.Id}}' "$img_id" 2>/dev/null || true)
                   if [ -z "$img_inspect" ]; then
                     continue
@@ -1076,9 +1078,9 @@ jobs:
                 done
               fi
               
-              # Удаляем старые версии с тегами (оставляем последние 5)
+              # РЈРґР°Р»СЏРµРј СЃС‚Р°СЂС‹Рµ РІРµСЂСЃРёРё СЃ С‚РµРіР°РјРё (РѕСЃС‚Р°РІР»СЏРµРј РїРѕСЃР»РµРґРЅРёРµ 5)
               if [ "$image_count" -gt 5 ]; then
-                # Получаем образы с тегами (не <none> и не latest), отсортированные по дате
+                # РџРѕР»СѓС‡Р°РµРј РѕР±СЂР°Р·С‹ СЃ С‚РµРіР°РјРё (РЅРµ <none> Рё РЅРµ latest), РѕС‚СЃРѕСЂС‚РёСЂРѕРІР°РЅРЅС‹Рµ РїРѕ РґР°С‚Рµ
                 tagged_images=$(echo "$all_images" | awk -F'\t' '$2 != "<none>" && $2 != "latest" {print $1 "\t" $2 "\t" $3}' | sort -k3 -r || true)
                 if [ -n "$tagged_images" ]; then
                   tagged_count=$(echo "$tagged_images" | wc -l)
@@ -1097,11 +1099,11 @@ jobs:
                 fi
               fi
             done
-            # Удаляем неиспользуемые volumes (docker volume prune не поддерживает фильтр until)
+            # РЈРґР°Р»СЏРµРј РЅРµРёСЃРїРѕР»СЊР·СѓРµРјС‹Рµ volumes (docker volume prune РЅРµ РїРѕРґРґРµСЂР¶РёРІР°РµС‚ С„РёР»СЊС‚СЂ until)
             docker volume prune -f || true
-            # Удаляем build cache старше 24 часов
+            # РЈРґР°Р»СЏРµРј build cache СЃС‚Р°СЂС€Рµ 24 С‡Р°СЃРѕРІ
             docker builder prune -af --filter "until=24h" || true
-            # Показываем использование диска
+            # РџРѕРєР°Р·С‹РІР°РµРј РёСЃРїРѕР»СЊР·РѕРІР°РЅРёРµ РґРёСЃРєР°
             echo "Docker disk usage after cleanup:"
             docker system df
 
