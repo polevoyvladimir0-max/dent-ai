@@ -1,8 +1,7 @@
 # Dent AI Runbook
 
 ## 1. Контакты и область
-- **Среда**: Yandex Cloud, VM `ubuntu@158.160.203.51`, каталог `/srv/dent_ai`.
-- **Доступ**: SSH-ключ `yc-dent-ai`, alias `dent-ai-vm`.
+- **Среда**: Yandex Cloud (актуальные хост/SSH — `docs/production.md`).
 - **Назначение**: FastAPI + Telegram-бот + ML пайплайн, state в PostgreSQL/Qdrant/Redis, файлы в MinIO.
 
 ## 2. Старт/останов

@@ -201,525 +201,11 @@ jobs:
 
 
 
-  build-and-push:
-
-    name: Build & Push Images
-
-    needs: quality
-
-    runs-on: ubuntu-24.04
-
-    permissions:
-
-      contents: read
-
-      packages: write
-
-      id-token: write
-
-    env:
-
-      REGISTRY: ${{ secrets.REGISTRY_URL }}
-
-      REGISTRY_USER: ${{ secrets.REGISTRY_USER }}
-
-      REGISTRY_PASSWORD: ${{ secrets.REGISTRY_PASSWORD }}
-
-      IMAGE_TAG: ${{ github.sha }}
-
-    outputs:
-
-      app_digest: ${{ steps.build_app.outputs.digest }}
-
-      bot_digest: ${{ steps.build_bot.outputs.digest }}
-
-      backup_digest: ${{ steps.build_backup.outputs.digest }}
-
-    steps:
-
-      - name: Checkout
-
-        uses: actions/checkout@v4
-
-
-
-      - name: Set up QEMU
-
-        uses: docker/setup-qemu-action@v3
-
-
-
-      - name: Set up Docker Buildx
-
-        uses: docker/setup-buildx-action@v3
-
-
-
-      - name: Install Python dependencies for token minting
-
-        run: |
-
-          python -m pip install --upgrade pip
-
-          pip install pyjwt[crypto]
-
-      - name: Mint YCR IAM token
-
-        if: env.REGISTRY_PASSWORD != ''
-
-        env:
-
-          REGISTRY_PASSWORD: ${{ env.REGISTRY_PASSWORD }}
-
-          REGISTRY_USER: ${{ env.REGISTRY_USER }}
-
-        run: |
-
-          set -euo pipefail
-
-          result=$(python .github/scripts/mint_ycr_token.py 2>&1) || true
-
-          echo "Token minting output:"
-
-          echo "$result"
-
-          if [ -n "$result" ]; then
-
-            while IFS='=' read -r key value; do
-
-              case "$key" in
-
-                username)
-
-                  printf 'EFFECTIVE_REGISTRY_USER=%s\n' "$value" >> "$GITHUB_ENV"
-
-                  echo "Set EFFECTIVE_REGISTRY_USER"
-
-                  ;;
-
-                token)
-
-                  echo "::add-mask::$value"
-
-                  printf 'EFFECTIVE_REGISTRY_PASSWORD=%s\n' "$value" >> "$GITHUB_ENV"
-
-                  echo "Set EFFECTIVE_REGISTRY_PASSWORD (token length: ${#value})"
-
-                  ;;
-
-              esac
-
-            done <<< "$result"
-
-          else
-
-            echo "Warning: No token generated from mint script"
-
-          fi
-
-
-
-      - name: Log in to registry
-
-        env:
-
-          REGISTRY_FULL: ${{ env.REGISTRY }}
-
-          REGISTRY_USER: ${{ env.REGISTRY_USER }}
-
-          REGISTRY_PASSWORD: ${{ env.REGISTRY_PASSWORD }}
-
-        run: |
-
-          set -euo pipefail
-
-
-
-          if [ -z "${REGISTRY_FULL}" ]; then
-
-            echo "REGISTRY secret is empty" >&2
-
-            exit 1
-
-          fi
-
-
-
-          REGISTRY_HOST="${REGISTRY_FULL%%/*}"
-
-          REGISTRY_SUFFIX="${REGISTRY_FULL#${REGISTRY_HOST}}"
-
-          if [ "${REGISTRY_SUFFIX}" = "${REGISTRY_FULL}" ]; then
-
-            REGISTRY_SUFFIX=""
-
-          fi
-
-          if [ -z "${REGISTRY_HOST}" ]; then
-
-            echo "Unable to derive registry host from ${REGISTRY_FULL}" >&2
-
-            exit 1
-
-          fi
-
-
-
-          FALLBACK_HOSTS="${REGISTRY_HOST}"
-
-          if [ "${REGISTRY_HOST}" = "cr.yandex" ]; then
-
-            FALLBACK_HOSTS="${FALLBACK_HOSTS} registry.yandexcloud.net container-registry.api.cloud.yandex.net"
-
-          fi
-
-
-
-          CANDIDATE_USERS=()
-
-          CANDIDATE_PASSWORDS=()
-
-
-
-          if [ -n "${EFFECTIVE_REGISTRY_PASSWORD:-}" ]; then
-
-            CANDIDATE_USERS+=("${EFFECTIVE_REGISTRY_USER:-oauth}")
-
-            CANDIDATE_PASSWORDS+=("${EFFECTIVE_REGISTRY_PASSWORD}")
-
-          fi
-
-
-
-          if [ -n "${REGISTRY_USER:-}" ] && [ -n "${REGISTRY_PASSWORD:-}" ]; then
-
-            CANDIDATE_USERS+=("${REGISTRY_USER}")
-
-            CANDIDATE_PASSWORDS+=("${REGISTRY_PASSWORD}")
-
-          fi
-
-
-
-          if [ "${#CANDIDATE_PASSWORDS[@]}" -eq 0 ]; then
-
-            echo "No registry credentials available" >&2
-
-            exit 1
-
-          fi
-
-
-
-          for host in ${FALLBACK_HOSTS}; do
-
-            echo "Attempting docker login to ${host}"
-
-            for attempt in $(seq 1 5); do
-
-              echo "  try ${attempt}/5..."
-
-              for idx in "${!CANDIDATE_PASSWORDS[@]}"; do
-
-                user="${CANDIDATE_USERS[$idx]}"
-
-                pass="${CANDIDATE_PASSWORDS[$idx]}"
-
-
-
-                if [ -z "${user}" ] || [ -z "${pass}" ]; then
-
-                  continue
-
-                fi
-
-
-
-                if output=$(echo "${pass}" | docker login "${host}" -u "${user}" --password-stdin 2>&1); then
-
-                  printf '%s\n' "${output}"
-
-                  if [ "${host}" != "${REGISTRY_HOST}" ]; then
-
-                    UPDATED_REGISTRY="${host}${REGISTRY_SUFFIX}"
-
-                    echo "Using fallback registry endpoint ${UPDATED_REGISTRY} for pushes"
-
-                    echo "REGISTRY=${UPDATED_REGISTRY}" >> "${GITHUB_ENV}"
-
-                  fi
-
-                  exit 0
-
-                else
-
-                  status=$?
-
-                  printf '%s\n' "${output}" >&2
-
-                  echo "    credential option $((idx + 1))/${#CANDIDATE_PASSWORDS[@]} failed (exit ${status})" >&2
-
-                fi
-
-              done
-
-              sleep $((attempt * 5))
-
-            done
-
-            echo "Failed to log in via ${host}" >&2
-
-          done
-
-
-
-          echo "All registry login attempts failed" >&2
-
-          exit 1
-
-
-
-      - name: Install cosign
-
-        uses: sigstore/cosign-installer@v3.6.0
-
-
-
-      - name: Build and push base image
-
-        id: build_base
-
-        uses: docker/build-push-action@v6
-
-        with:
-
-          context: .
-
-          file: infra/docker/base.Dockerfile
-
-          push: true
-
-          platforms: ${{ env.PLATFORMS }}
-
-          tags: |
-
-            ${{ env.REGISTRY }}/dent-ai/base:${{ env.IMAGE_TAG }}
-
-            ${{ env.REGISTRY }}/dent-ai/base:latest
-
-          cache-from: type=gha,scope=base
-
-          cache-to: type=gha,scope=base,mode=max
-
-          provenance: true
-
-          sbom: true
-
-
-
-      - name: Sign base image
-
-        env:
-
-          COSIGN_YES: "true"
-
-        run: cosign sign --yes ${{ env.REGISTRY }}/dent-ai/base@${{ steps.build_base.outputs.digest }}
-
-
-
-      - name: Build and push app image
-
-        id: build_app
-
-        uses: docker/build-push-action@v6
-
-        with:
-
-          context: .
-
-          file: infra/docker/app.Dockerfile
-
-          push: true
-
-          platforms: ${{ env.PLATFORMS }}
-
-          build-args: |
-
-            BASE_IMAGE=${{ env.REGISTRY }}/dent-ai/base:${{ env.IMAGE_TAG }}
-
-          tags: |
-
-            ${{ env.REGISTRY }}/dent-ai/app:${{ env.IMAGE_TAG }}
-
-            ${{ env.REGISTRY }}/dent-ai/app:latest
-
-          cache-from: type=gha,scope=app
-
-          cache-to: type=gha,scope=app,mode=max
-
-          provenance: true
-
-          sbom: true
-
-
-
-      - name: Sign app image
-
-        env:
-
-          COSIGN_YES: "true"
-
-        run: cosign sign --yes ${{ env.REGISTRY }}/dent-ai/app@${{ steps.build_app.outputs.digest }}
-
-
-
-      - name: SBOM (app)
-
-        uses: anchore/sbom-action@v0.17.0
-
-        with:
-
-          image: ${{ env.REGISTRY }}/dent-ai/app@${{ steps.build_app.outputs.digest }}
-
-          output-file: sbom-app.spdx.json
-
-
-
-      - name: Build and push bot image
-
-        id: build_bot
-
-        uses: docker/build-push-action@v6
-
-        with:
-
-          context: .
-
-          file: infra/docker/bot.Dockerfile
-
-          push: true
-
-          platforms: ${{ env.PLATFORMS }}
-
-          build-args: |
-
-            BASE_IMAGE=${{ env.REGISTRY }}/dent-ai/base:${{ env.IMAGE_TAG }}
-
-          tags: |
-
-            ${{ env.REGISTRY }}/dent-ai/bot:${{ env.IMAGE_TAG }}
-
-            ${{ env.REGISTRY }}/dent-ai/bot:latest
-
-          cache-from: type=gha,scope=bot
-
-          cache-to: type=gha,scope=bot,mode=max
-
-          provenance: true
-
-          sbom: true
-
-
-
-      - name: Sign bot image
-
-        env:
-
-          COSIGN_YES: "true"
-
-        run: cosign sign --yes ${{ env.REGISTRY }}/dent-ai/bot@${{ steps.build_bot.outputs.digest }}
-
-
-
-      - name: SBOM (bot)
-
-        uses: anchore/sbom-action@v0.17.0
-
-        with:
-
-          image: ${{ env.REGISTRY }}/dent-ai/bot@${{ steps.build_bot.outputs.digest }}
-
-          output-file: sbom-bot.spdx.json
-
-
-
-      - name: Build and push backup image
-
-        id: build_backup
-
-        uses: docker/build-push-action@v6
-
-        with:
-
-          context: .
-
-          file: infra/docker/backup.Dockerfile
-
-          push: true
-
-          platforms: ${{ env.PLATFORMS }}
-
-          tags: |
-
-            ${{ env.REGISTRY }}/dent-ai/backup:${{ env.IMAGE_TAG }}
-
-            ${{ env.REGISTRY }}/dent-ai/backup:latest
-
-          cache-from: type=gha,scope=backup
-
-          cache-to: type=gha,scope=backup,mode=max
-
-          provenance: true
-
-          sbom: true
-
-
-
-      - name: Sign backup image
-
-        env:
-
-          COSIGN_YES: "true"
-
-        run: cosign sign --yes ${{ env.REGISTRY }}/dent-ai/backup@${{ steps.build_backup.outputs.digest }}
-
-
-
-      - name: SBOM (backup)
-
-        uses: anchore/sbom-action@v0.17.0
-
-        with:
-
-          image: ${{ env.REGISTRY }}/dent-ai/backup@${{ steps.build_backup.outputs.digest }}
-
-          output-file: sbom-backup.spdx.json
-
-
-
-      - name: Upload SBOM artifacts
-
-        uses: actions/upload-artifact@v4
-
-        with:
-
-          name: sbom-${{ github.sha }}
-
-          path: |
-
-            sbom-app.spdx.json
-
-            sbom-bot.spdx.json
-
-            sbom-backup.spdx.json
-
-
-
   deploy:
 
     if: github.ref == 'refs/heads/main'
 
-    needs: build-and-push
+    needs: quality
 
     runs-on: ubuntu-24.04
 
@@ -739,17 +225,9 @@ jobs:
 
 
 
-      - name: Validate CI secrets against schema
-
-        shell: pwsh
+      - name: Validate deploy secrets
 
         env:
-
-          REGISTRY_URL: ${{ secrets.REGISTRY_URL }}
-
-          REGISTRY_USER: ${{ secrets.REGISTRY_USER }}
-
-          REGISTRY_PASSWORD: ${{ secrets.REGISTRY_PASSWORD }}
 
           DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
 
@@ -761,74 +239,19 @@ jobs:
 
         run: |
 
-          $payload = @{
-
-            REGISTRY_URL    = [string]$env:REGISTRY_URL
-
-            REGISTRY_USER   = [string]$env:REGISTRY_USER
-
-            REGISTRY_PASSWORD = [string]$env:REGISTRY_PASSWORD
-
-            DEPLOY_HOST     = [string]$env:DEPLOY_HOST
-
-            DEPLOY_USER     = [string]$env:DEPLOY_USER
-
-            DEPLOY_SSH_KEY  = [string]$env:DEPLOY_SSH_KEY
-
-            DEPLOY_PATH     = [string]$env:DEPLOY_PATH
-
-          }
-
-          $json = $payload | ConvertTo-Json -Depth 2 -Compress
-
-          Set-Content -Path ci-secrets.json -Value $json -NoNewline
-
-          ./infra/scripts/generate-env.ps1 -Target ci -SecretsPath ./ci-secrets.json -DryRun
-
-          Remove-Item ci-secrets.json
-
-
-
-      - name: Mint YCR IAM token
-
-        env:
-
-          REGISTRY_PASSWORD: ${{ secrets.REGISTRY_PASSWORD }}
-
-          REGISTRY_USER: ${{ secrets.REGISTRY_USER }}
-
-        run: |
-
           set -euo pipefail
 
-          result=$(python .github/scripts/mint_ycr_token.py)
+          missing=0
 
+          for var in DEPLOY_HOST DEPLOY_USER DEPLOY_SSH_KEY DEPLOY_PATH; do
+            if [ -z "${!var:-}" ]; then
+              echo "Missing required secret: ${var}" >&2
+              missing=1
+            fi
+          done
 
-
-          if [ -n "$result" ]; then
-
-            while IFS='=' read -r key value; do
-
-              case "$key" in
-
-                username)
-
-                  printf 'EFFECTIVE_REGISTRY_USER=%s\n' "$value" >> "$GITHUB_ENV"
-
-                  ;;
-
-                token)
-
-                  echo "::add-mask::$value"
-
-                  printf 'EFFECTIVE_REGISTRY_PASSWORD=%s\n' "$value" >> "$GITHUB_ENV"
-
-                  ;;
-
-              esac
-
-            done <<< "$result"
-
+          if [ "$missing" -ne 0 ]; then
+            exit 1
           fi
 
 
@@ -838,16 +261,6 @@ jobs:
         uses: appleboy/ssh-action@v1.2.0
 
         env:
-
-          REGISTRY_URL: ${{ secrets.REGISTRY_URL }}
-
-          REGISTRY_USER: ${{ secrets.REGISTRY_USER }}
-
-          REGISTRY_PASSWORD: ${{ secrets.REGISTRY_PASSWORD }}
-
-          EFFECTIVE_REGISTRY_USER: ${{ env.EFFECTIVE_REGISTRY_USER }}
-
-          EFFECTIVE_REGISTRY_PASSWORD: ${{ env.EFFECTIVE_REGISTRY_PASSWORD }}
 
           DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
           VAULT_UNSEAL_STRATEGY: ${{ secrets.VAULT_UNSEAL_STRATEGY }}
@@ -865,23 +278,16 @@ jobs:
 
           command_timeout: 45m
 
-          envs: REGISTRY_URL,REGISTRY_USER,REGISTRY_PASSWORD,EFFECTIVE_REGISTRY_USER,EFFECTIVE_REGISTRY_PASSWORD,DEPLOY_PATH,VAULT_UNSEAL_STRATEGY,VAULT_UNSEAL_LOCKBOX_SECRET_ID,VAULT_UNSEAL_LOCKBOX_ENTRY_PREFIX,VAULT_UNSEAL_SA_KEY_FILE
+          envs: DEPLOY_PATH,VAULT_UNSEAL_STRATEGY,VAULT_UNSEAL_LOCKBOX_SECRET_ID,VAULT_UNSEAL_LOCKBOX_ENTRY_PREFIX,VAULT_UNSEAL_SA_KEY_FILE
 
           script: |
 
             set -euo pipefail
 
-            REGISTRY="$REGISTRY_URL"
-
-            IMAGE_TAG="${{ github.sha }}"
-
-            APP_IMAGE="${REGISTRY}/dent-ai/app@${{ needs.build-and-push.outputs.app_digest }}"
-
-            BOT_IMAGE="${REGISTRY}/dent-ai/bot@${{ needs.build-and-push.outputs.bot_digest }}"
-
-            BACKUP_IMAGE="${REGISTRY}/dent-ai/backup@${{ needs.build-and-push.outputs.backup_digest }}"
-
             cd "$DEPLOY_PATH"
+
+            git fetch --all
+            git reset --hard origin/main
 
             # Ensure yc CLI (needed for vault auto-unseal lockbox)
             if ! command -v yc >/dev/null 2>&1; then
@@ -911,80 +317,14 @@ jobs:
               mv "$TMP_ENV" "$ENV_FILE_PATH"
             fi
 
-            LOGIN_USER="$REGISTRY_USER"
-
-            LOGIN_PASS="$REGISTRY_PASSWORD"
-
-            if [ -n "$EFFECTIVE_REGISTRY_PASSWORD" ]; then
-
-              LOGIN_USER="${EFFECTIVE_REGISTRY_USER:-iam}"
-
-              LOGIN_PASS="$EFFECTIVE_REGISTRY_PASSWORD"
-
-            fi
-
-            if [ -z "$LOGIN_USER" ]; then
-
-              LOGIN_USER="iam"
-
-            fi
-
-            echo "Logging into Docker registry..."
-            printf '%s' "$LOGIN_PASS" | docker login "$REGISTRY" -u "$LOGIN_USER" --password-stdin
-
-            echo "Pulling base image..."
-            BASE_IMAGE="${REGISTRY}/dent-ai/base:${IMAGE_TAG}"
-            if command -v timeout >/dev/null 2>&1; then
-              timeout 600 docker pull "${BASE_IMAGE}" || timeout 600 docker pull "${REGISTRY}/dent-ai/base:latest" || echo "Warning: Failed to pull base image"
-            else
-              docker pull "${BASE_IMAGE}" || docker pull "${REGISTRY}/dent-ai/base:latest" || echo "Warning: Failed to pull base image"
-            fi
-
-            echo "Pulling application images..."
-            export APP_IMAGE BOT_IMAGE BACKUP_IMAGE
-            if command -v timeout >/dev/null 2>&1; then
-              timeout 900 docker compose pull app bot postgres-backup || { echo "Error: Failed to pull images" >&2; exit 1; }
-            else
-              docker compose pull app bot postgres-backup || { echo "Error: Failed to pull images" >&2; exit 1; }
-            fi
+            echo "Building images on server..."
+            docker compose build app bot postgres-backup
 
             echo "Starting containers..."
             docker compose up -d --force-recreate --remove-orphans
 
             echo "Waiting for containers to start..."
             sleep 5
-
-            # РЈРґР°Р»СЏРµРј РѕСЃС‚Р°РЅРѕРІР»РµРЅРЅС‹Рµ РєРѕРЅС‚РµР№РЅРµСЂС‹ РїРµСЂРµРґ unseal
-            stopped=$(docker compose ps --filter "status=exited" -q || true)
-            if [ -n "$stopped" ]; then
-              echo "$stopped" | xargs docker rm -f || true
-            fi
-
-            # РЎСЂР°Р·Сѓ СѓРґР°Р»СЏРµРј РѕР±СЂР°Р·С‹ СЃ <none> С‚РµРіР°РјРё (РѕРЅРё СЃРѕР·РґР°СЋС‚СЃСЏ РїСЂРё РїРµСЂРµСЃРѕР·РґР°РЅРёРё РєРѕРЅС‚РµР№РЅРµСЂРѕРІ)
-            echo "Removing dangling images with <none> tags..."
-            # РџРѕР»СѓС‡Р°РµРј ID РІСЃРµС… РѕР±СЂР°Р·РѕРІ, РёСЃРїРѕР»СЊР·СѓРµРјС‹С… РІ СЂР°Р±РѕС‚Р°СЋС‰РёС… РєРѕРЅС‚РµР№РЅРµСЂР°С…
-            used_image_ids=$(docker ps --format "{{.ID}}" | xargs -I {} docker inspect -f '{{.Image}}' {} 2>/dev/null | sort -u || true)
-            
-            for image_name in app bot base backup; do
-              # РџРѕР»СѓС‡Р°РµРј ID РѕР±СЂР°Р·РѕРІ СЃ <none> С‚РµРіР°РјРё
-              none_images=$(docker images "${REGISTRY}/dent-ai/${image_name}" --format "{{.ID}}\t{{.Tag}}" --filter "dangling=false" | \
-                awk -F'\t' '$2 == "<none>" {print $1}' || true)
-              if [ -n "$none_images" ]; then
-                for img_id in $none_images; do
-                  # РџСЂРѕРІРµСЂСЏРµРј, С‡С‚Рѕ РѕР±СЂР°Р· РЅРµ РёСЃРїРѕР»СЊР·СѓРµС‚СЃСЏ РІ СЂР°Р±РѕС‚Р°СЋС‰РёС… РєРѕРЅС‚РµР№РЅРµСЂР°С…
-                  img_full_id=$(docker inspect -f '{{.Id}}' "$img_id" 2>/dev/null || echo "")
-                  if [ -z "$img_full_id" ]; then
-                    continue
-                  fi
-                  if ! echo "$used_image_ids" | grep -q "^sha256:$img_full_id" && ! echo "$used_image_ids" | grep -q "$img_id"; then
-                    echo "  Removing <none> image $img_id for ${image_name}"
-                    docker rmi -f "$img_id" 2>/dev/null || true
-                  else
-                    echo "  Skipping <none> image $img_id for ${image_name} (in use)"
-                  fi
-                done
-              fi
-            done
 
             echo "Checking container status..."
             docker compose ps
@@ -1042,68 +382,6 @@ jobs:
             echo "Cleaning up unused Docker resources..."
             # РЈРґР°Р»СЏРµРј РѕСЃС‚Р°РЅРѕРІР»РµРЅРЅС‹Рµ РєРѕРЅС‚РµР№РЅРµСЂС‹ СЃС‚Р°СЂС€Рµ 24 С‡Р°СЃРѕРІ
             docker container prune -f --filter "until=24h" || true
-            # РЈРґР°Р»СЏРµРј РЅРµРёСЃРїРѕР»СЊР·СѓРµРјС‹Рµ РѕР±СЂР°Р·С‹ СЃС‚Р°СЂС€Рµ 7 РґРЅРµР№
-            docker image prune -af --filter "until=168h" || true
-            # РЈРґР°Р»СЏРµРј СЃС‚Р°СЂС‹Рµ РІРµСЂСЃРёРё РѕР±СЂР°Р·РѕРІ dent-ai/* (РѕСЃС‚Р°РІР»СЏРµРј РїРѕСЃР»РµРґРЅРёРµ 5 SHA)
-            echo "Cleaning up old image versions..."
-            for image_name in app bot base backup; do
-              echo "Checking ${image_name} images..."
-              # РџРѕР»СѓС‡Р°РµРј РІСЃРµ РѕР±СЂР°Р·С‹ (РІРєР»СЋС‡Р°СЏ <none> С‚РµРіРё), РѕС‚СЃРѕСЂС‚РёСЂРѕРІР°РЅРЅС‹Рµ РїРѕ РґР°С‚Рµ СЃРѕР·РґР°РЅРёСЏ
-              # РСЃРїРѕР»СЊР·СѓРµРј С„РѕСЂРјР°С‚: ID,Tag,CreatedAt РґР»СЏ Р±РѕР»РµРµ РЅР°РґС‘Р¶РЅРѕР№ СЃРѕСЂС‚РёСЂРѕРІРєРё
-              all_images=$(docker images "${REGISTRY}/dent-ai/${image_name}" --format "{{.ID}}\t{{.Tag}}\t{{.CreatedAt}}" --filter "dangling=false" | \
-                sort -k3 -r || true)
-              if [ -z "$all_images" ]; then
-                echo "No ${image_name} images found"
-                continue
-              fi
-              # РџРѕРґСЃС‡РёС‚С‹РІР°РµРј РєРѕР»РёС‡РµСЃС‚РІРѕ РѕР±СЂР°Р·РѕРІ
-              image_count=$(echo "$all_images" | wc -l)
-              echo "Found $image_count ${image_name} image(s)"
-              
-              # РџРѕР»СѓС‡Р°РµРј ID РѕР±СЂР°Р·РѕРІ, РєРѕС‚РѕСЂС‹Рµ РёСЃРїРѕР»СЊР·СѓСЋС‚СЃСЏ РІ СЂР°Р±РѕС‚Р°СЋС‰РёС… РєРѕРЅС‚РµР№РЅРµСЂР°С…
-              used_ids=$(docker ps --format "{{.Image}}" | xargs -I {} docker inspect -f '{{.Id}}' {} 2>/dev/null | sort -u || true)
-              
-              # РЈРґР°Р»СЏРµРј РѕР±СЂР°Р·С‹ СЃ С‚РµРіРѕРј <none> (РѕРЅРё СЃРѕР·РґР°СЋС‚СЃСЏ РїСЂРё РїРµСЂРµСЃРѕР·РґР°РЅРёРё РєРѕРЅС‚РµР№РЅРµСЂРѕРІ)
-              echo "Removing images with <none> tags..."
-              none_images=$(docker images "${REGISTRY}/dent-ai/${image_name}" --format "{{.ID}}\t{{.Tag}}" --filter "dangling=false" | \
-                awk -F'\t' '$2 == "<none>" {print $1}' || true)
-              if [ -n "$none_images" ]; then
-                for img_id in $none_images; do
-                  # РџСЂРѕРІРµСЂСЏРµРј, РёСЃРїРѕР»СЊР·СѓРµС‚СЃСЏ Р»Рё СЌС‚РѕС‚ РѕР±СЂР°Р· РІ СЂР°Р±РѕС‚Р°СЋС‰РёС… РєРѕРЅС‚РµР№РЅРµСЂР°С…
-                  img_inspect=$(docker inspect -f '{{.Id}}' "$img_id" 2>/dev/null || true)
-                  if [ -z "$img_inspect" ]; then
-                    continue
-                  fi
-                  if ! echo "$used_ids" | grep -q "$img_inspect"; then
-                    echo "  Removing <none> image $img_id for ${image_name}"
-                    docker rmi -f "$img_id" 2>/dev/null || true
-                  else
-                    echo "  Skipping <none> image $img_id for ${image_name} (in use)"
-                  fi
-                done
-              fi
-              
-              # РЈРґР°Р»СЏРµРј СЃС‚Р°СЂС‹Рµ РІРµСЂСЃРёРё СЃ С‚РµРіР°РјРё (РѕСЃС‚Р°РІР»СЏРµРј РїРѕСЃР»РµРґРЅРёРµ 5)
-              if [ "$image_count" -gt 5 ]; then
-                # РџРѕР»СѓС‡Р°РµРј РѕР±СЂР°Р·С‹ СЃ С‚РµРіР°РјРё (РЅРµ <none> Рё РЅРµ latest), РѕС‚СЃРѕСЂС‚РёСЂРѕРІР°РЅРЅС‹Рµ РїРѕ РґР°С‚Рµ
-                tagged_images=$(echo "$all_images" | awk -F'\t' '$2 != "<none>" && $2 != "latest" {print $1 "\t" $2 "\t" $3}' | sort -k3 -r || true)
-                if [ -n "$tagged_images" ]; then
-                  tagged_count=$(echo "$tagged_images" | wc -l)
-                  if [ "$tagged_count" -gt 5 ]; then
-                    old_tagged=$(echo "$tagged_images" | tail -n +6 | awk '{print $1}' || true)
-                    if [ -n "$old_tagged" ]; then
-                      echo "Removing $(echo "$old_tagged" | wc -l) old tagged ${image_name} image(s)..."
-                      for img_id in $old_tagged; do
-                        if ! echo "$used_ids" | grep -q "$img_id"; then
-                          echo "  Removing old tagged image $img_id"
-                          docker rmi -f "$img_id" 2>/dev/null || true
-                        fi
-                      done
-                    fi
-                  fi
-                fi
-              fi
-            done
             # РЈРґР°Р»СЏРµРј РЅРµРёСЃРїРѕР»СЊР·СѓРµРјС‹Рµ volumes (docker volume prune РЅРµ РїРѕРґРґРµСЂР¶РёРІР°РµС‚ С„РёР»СЊС‚СЂ until)
             docker volume prune -f || true
             # РЈРґР°Р»СЏРµРј build cache СЃС‚Р°СЂС€Рµ 24 С‡Р°СЃРѕРІ

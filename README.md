@@ -21,15 +21,7 @@
 - Docker ≥ 25 + compose plugin.
 - PowerShell 7+ (`pwsh`) — генератор `.env`.
 - Mutagen ≥ 0.18 на обеих сторонах (`mutagen version`).
-- SSH-ключ `yc-dent-ai` прописан в `~/.ssh/config`:
-  ```
-  Host dent-ai-vm
-      HostName 158.160.203.51
-      User ubuntu
-      IdentityFile C:/Users/plove/.ssh/yc-dent-ai
-      IdentitiesOnly yes
-      StrictHostKeyChecking accept-new
-  ```
+- Прод‑окружение (хост, SSH, секреты CI) — в `docs/production.md`.
 
 ## Git + Mutagen рабочий цикл
 1. `git clone git@github.com:<org>/dent_ai.git` → `cd dent_ai`.
