@@ -262,6 +262,8 @@ services:
     build:
       context: .
       dockerfile: infra/docker/app.Dockerfile
+      args:
+        BASE_IMAGE: ${BASE_IMAGE:-dent_ai_base:dev}
     container_name: dent_ai_app
     labels:
       - autoheal=true
@@ -302,6 +304,8 @@ services:
     build:
       context: .
       dockerfile: infra/docker/bot.Dockerfile
+      args:
+        BASE_IMAGE: ${BASE_IMAGE:-dent_ai_base:dev}
     container_name: dent_ai_bot
     labels:
       - autoheal=true

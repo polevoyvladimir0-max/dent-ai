@@ -317,6 +317,9 @@ jobs:
               mv "$TMP_ENV" "$ENV_FILE_PATH"
             fi
 
+            echo "Building base image on server..."
+            docker build -f infra/docker/base.Dockerfile -t dent_ai_base:dev .
+
             echo "Building images on server..."
             docker compose build app bot postgres-backup
 

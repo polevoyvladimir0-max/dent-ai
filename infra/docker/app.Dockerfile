@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1.8
-ARG BASE_IMAGE=cr.yandex/crprbk2jtq9a96om7uvp/dent-ai/base:latest
+ARG BASE_IMAGE=dent_ai_base:dev
 FROM ${BASE_IMAGE}
 
 COPY . /app
