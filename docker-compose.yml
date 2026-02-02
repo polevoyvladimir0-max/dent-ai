@@ -130,7 +130,7 @@ services:
       - IPC_LOCK
     environment:
       VAULT_ADDR: ${VAULT_ADDR}
-    command: ["vault", "server", "-config=/vault/config/config.hcl"]
+    command: ["vault", "server", "-config=/vault/config/${VAULT_CONFIG_FILE:-config.hcl}"]
     ports:
       - "${VAULT_HOST_PORT:-8200}:8200"
     volumes:
