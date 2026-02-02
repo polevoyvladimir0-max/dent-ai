@@ -289,23 +289,66 @@ jobs:
             git fetch --all
             git reset --hard origin/main
 
-            # Ensure yc CLI (needed for vault auto-unseal lockbox)
-            if ! command -v yc >/dev/null 2>&1; then
-              echo "yc CLI not found, installing..."
-              curl -sSfL https://storage.yandexcloud.net/yandexcloud-yc/install.sh | bash || true
-              export PATH="$HOME/yandex-cloud/bin:$PATH"
-            fi
-            if ! command -v yc >/dev/null 2>&1; then
-              echo "yc CLI install failed or not in PATH" >&2
-              exit 1
-            fi
-            YC_BIN_PATH=$(command -v yc)
-            export PATH="$PATH"
+            ENV_FILE_PATH="$DEPLOY_PATH/.env"
+            touch "$ENV_FILE_PATH"
 
-            # Ensure Vault auto-unseal config exists in .env when provided via CI secrets
+            get_env_value() {
+              local key="$1"
+              sed -n "s/^${key}=//p" "$ENV_FILE_PATH" | tail -n 1
+            }
+
+            VAULT_SEAL_ADDR="$(get_env_value VAULT_SEAL_ADDR || true)"
+            VAULT_SEAL_TOKEN="$(get_env_value VAULT_SEAL_TOKEN || true)"
+            VAULT_SEAL_KEY_NAME="$(get_env_value VAULT_SEAL_KEY_NAME || true)"
+            VAULT_SEAL_MOUNT_PATH="$(get_env_value VAULT_SEAL_MOUNT_PATH || true)"
+
+            if [ -n "$VAULT_SEAL_ADDR" ] && [ -n "$VAULT_SEAL_TOKEN" ]; then
+              VAULT_SEAL_KEY_NAME="${VAULT_SEAL_KEY_NAME:-dent-ai-unseal}"
+              VAULT_SEAL_MOUNT_PATH="${VAULT_SEAL_MOUNT_PATH:-transit/}"
+
+              cat > "$DEPLOY_PATH/infra/vault/config.transit.hcl" <<EOF
+            ui = true
+            disable_mlock = true
+
+            storage "file" { path = "/vault/file" }
+
+            listener "tcp" {
+              address     = "0.0.0.0:8200"
+              tls_disable = 1
+            }
+
+            api_addr = "http://localhost:8200"
+            cluster_addr = "http://vault:8201"
+
+            seal "transit" {
+              address         = "${VAULT_SEAL_ADDR}"
+              token           = "${VAULT_SEAL_TOKEN}"
+              key_name        = "${VAULT_SEAL_KEY_NAME}"
+              mount_path      = "${VAULT_SEAL_MOUNT_PATH}"
+              tls_skip_verify = true
+            }
+            EOF
+
+              TMP_ENV="${ENV_FILE_PATH}.tmp"
+              grep -vE '^VAULT_CONFIG_FILE=' "$ENV_FILE_PATH" > "$TMP_ENV" || true
+              echo "VAULT_CONFIG_FILE=config.transit.hcl" >> "$TMP_ENV"
+              mv "$TMP_ENV" "$ENV_FILE_PATH"
+            fi
+
             if [ -n "${VAULT_UNSEAL_LOCKBOX_SECRET_ID:-}" ]; then
-              ENV_FILE_PATH="$DEPLOY_PATH/.env"
-              touch "$ENV_FILE_PATH"
+              echo "Lockbox auto-unseal configured, ensuring yc CLI..."
+              if ! command -v yc >/dev/null 2>&1; then
+                echo "yc CLI not found, installing..."
+                curl -sSfL https://storage.yandexcloud.net/yandexcloud-yc/install.sh | bash || true
+                export PATH="$HOME/yandex-cloud/bin:$PATH"
+              fi
+              if ! command -v yc >/dev/null 2>&1; then
+                echo "yc CLI install failed or not in PATH" >&2
+                exit 1
+              fi
+              YC_BIN_PATH=$(command -v yc)
+              export PATH="$PATH"
+
               TMP_ENV="${ENV_FILE_PATH}.tmp"
               grep -vE '^VAULT_UNSEAL_(STRATEGY|LOCKBOX_SECRET_ID|LOCKBOX_ENTRY_PREFIX|SA_KEY_FILE)=' "$ENV_FILE_PATH" > "$TMP_ENV" || true
               {
@@ -332,8 +375,12 @@ jobs:
             echo "Checking container status..."
             docker compose ps
 
-            echo "Running vault auto-unseal..."
-            sudo env "PROJECT_DIR=$DEPLOY_PATH" "ENV_FILE=$DEPLOY_PATH/.env" "YC_BIN=$YC_BIN_PATH" bash ./infra/scripts/vault-auto-unseal.sh
+            if [ -n "${VAULT_UNSEAL_LOCKBOX_SECRET_ID:-}" ]; then
+              echo "Running vault auto-unseal..."
+              sudo env "PROJECT_DIR=$DEPLOY_PATH" "ENV_FILE=$DEPLOY_PATH/.env" "YC_BIN=$YC_BIN_PATH" bash ./infra/scripts/vault-auto-unseal.sh
+            else
+              echo "Skipping vault auto-unseal (lockbox not configured)"
+            fi
 
             HEALTH_URL="http://127.0.0.1:8000/ping"
 
